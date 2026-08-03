@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { SessionStore } from "./session-store";
-import type { AgentReply, AgentStatus, FeedbackInput } from "./types";
+import type { AgentReply, AgentStatus, FeedbackInput, FeedbackPollResult, SessionEndBy } from "./types";
 import {
   contentTypeFor,
   isLocalRequest,
@@ -12,37 +12,60 @@ import {
   sessionIdForPath,
 } from "./path-safety";
 
-const argv = Bun.argv.slice(2).filter((argument) => argument !== "--");
+export const DEFAULT_PORT = 8765;
+export const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1_000;
 
-function argumentValue(name: string): string | undefined {
-  const index = argv.findIndex((argument) => argument === name);
-  if (index >= 0) return argv[index + 1];
-  const prefix = `${name}=`;
-  return argv.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
+export interface PairPlanServerConfig {
+  artifactInput: string;
+  configuredRoot?: string;
+  stateDir: string;
+  port: number;
+  idleTimeoutMs: number;
+  installSignalHandlers?: boolean;
 }
 
-const artifactInput = argumentValue("--artifact")
-  ?? argv.find((argument) => !argument.startsWith("-"))
-  ?? Bun.env.PAIR_PLAN_ARTIFACT
-  ?? join(process.cwd(), "pair-plan-review-artifact.html");
-const configuredRoot = argumentValue("--root") ?? Bun.env.PAIR_PLAN_ARTIFACT_ROOT;
-const stateDir = resolve(argumentValue("--state-dir") ?? Bun.env.PAIR_PLAN_STATE_DIR ?? join(homedir(), ".pair-plan", "sessions"));
-const port = Number(argumentValue("--port") ?? Bun.env.PAIR_PLAN_PORT ?? 8765);
+export interface PairPlanServerRuntime {
+  readonly artifact: Awaited<ReturnType<typeof resolveArtifactPath>>;
+  readonly store: SessionStore;
+  readonly server: ReturnType<typeof Bun.serve>;
+  readonly port: number;
+  stop(): Promise<void>;
+}
 
-const artifact = await resolveArtifactPath(artifactInput, configuredRoot);
-const sessionId = sessionIdForPath(artifact.filePath);
-const store = await SessionStore.open({
-  id: sessionId,
-  filePath: artifact.filePath,
-  rootPath: artifact.rootPath,
-  stateDir,
-});
+export function defaultStateDir(): string {
+  return join(homedir(), ".pair-plan", "sessions");
+}
 
-const clientRoot = join(dirname(fileURLToPath(import.meta.url)), "client");
-const indexHtml = await readFile(join(clientRoot, "index.html"), "utf8");
-const clientModule = await readFile(join(clientRoot, "app.ts"), "utf8");
-const clientJavascript = new Bun.Transpiler({ loader: "ts", target: "browser" }).transformSync(clientModule);
-const clientStyles = await readFile(join(clientRoot, "styles.css"), "utf8");
+function argumentValue(args: string[], name: string): string | undefined {
+  const index = args.findIndex((argument) => argument === name);
+  if (index >= 0) return args[index + 1];
+  const prefix = `${name}=`;
+  return args.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
+}
+
+function parseNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseIdleTimeout(value: string | undefined): number {
+  if (!value) return DEFAULT_IDLE_TIMEOUT_MS;
+  if (value.toLowerCase() === "off") return 0;
+  return Math.max(0, parseNumber(value, DEFAULT_IDLE_TIMEOUT_MS));
+}
+
+export function parseServerConfig(args: string[] = Bun.argv.slice(2)): PairPlanServerConfig {
+  const argv = args.filter((argument) => argument !== "--");
+  const artifactInput = argumentValue(argv, "--artifact")
+    ?? argv.find((argument) => !argument.startsWith("-"))
+    ?? Bun.env.PAIR_PLAN_ARTIFACT
+    ?? join(process.cwd(), "pair-plan-review-artifact.html");
+  const configuredRoot = argumentValue(argv, "--root") ?? Bun.env.PAIR_PLAN_ARTIFACT_ROOT;
+  const stateDir = resolve(argumentValue(argv, "--state-dir") ?? Bun.env.PAIR_PLAN_STATE_DIR ?? defaultStateDir());
+  const port = Math.max(1, Math.min(65_535, Math.floor(parseNumber(argumentValue(argv, "--port") ?? Bun.env.PAIR_PLAN_PORT, DEFAULT_PORT))));
+  const idleTimeoutMs = parseIdleTimeout(argumentValue(argv, "--idle-timeout-ms") ?? Bun.env.PAIR_PLAN_IDLE_TIMEOUT_MS);
+  return { artifactInput, configuredRoot, stateDir, port, idleTimeoutMs };
+}
 
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
@@ -102,7 +125,7 @@ function normalizeFeedback(value: unknown): FeedbackInput {
 
   return {
     target,
-    body: stringValue(input.body, "body", 8000),
+    body: stringValue(input.body, "body", 8_000),
     ...(typeof input.queueKey === "string" && input.queueKey.trim() ? { queueKey: input.queueKey.trim().slice(0, 200) } : {}),
     ...(typeof input.tag === "string" && input.tag.trim() ? { tag: input.tag.trim().slice(0, 80) } : {}),
   };
@@ -121,8 +144,8 @@ function normalizeFeedbackList(payload: Record<string, unknown>): FeedbackInput[
 
 function normalizeReply(payload: Record<string, unknown>): AgentReply {
   return {
-    summary: stringValue(payload.summary, "summary", 4000),
-    ...(typeof payload.body === "string" ? { body: payload.body.slice(0, 8000) } : {}),
+    summary: stringValue(payload.summary, "summary", 4_000),
+    ...(typeof payload.body === "string" ? { body: payload.body.slice(0, 8_000) } : {}),
     ...(typeof payload.revision === "number" ? { revision: Math.max(1, Math.floor(payload.revision)) } : {}),
     ...(Array.isArray(payload.changedAnchors)
       ? { changedAnchors: payload.changedAnchors.filter((value): value is string => typeof value === "string").slice(0, 100) }
@@ -130,7 +153,7 @@ function normalizeReply(payload: Record<string, unknown>): AgentReply {
   };
 }
 
-function sessionPayload() {
+function sessionPayload(store: SessionStore) {
   return {
     ...store.getSnapshot(),
     artifactUrl: `/api/session/${store.id}/artifact/`,
@@ -139,159 +162,251 @@ function sessionPayload() {
     feedbackNextUrl: `/api/session/${store.id}/feedback/next`,
     feedbackAckUrl: `/api/session/${store.id}/feedback/ack`,
     replyUrl: `/api/session/${store.id}/reply`,
+    completeUrl: `/api/session/${store.id}/complete`,
     statusUrl: `/api/session/${store.id}/status`,
+    endUrl: `/api/session/${store.id}/end`,
   };
 }
 
-function sseResponse(request: Request): Response {
-  let closeStream: (() => void) | undefined;
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const encoder = new TextEncoder();
-      let closed = false;
-      const send = (event: unknown) => {
-        if (closed) return;
-        try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
-        } catch {
-          closeStream?.();
-        }
-      };
-      const unsubscribe = store.subscribe(send);
-      const heartbeat = setInterval(() => {
-        if (!closed) controller.enqueue(encoder.encode(": keep-alive\n\n"));
-      }, 15_000);
-      const close = () => {
-        if (closed) return;
-        closed = true;
-        clearInterval(heartbeat);
-        unsubscribe();
-        try {
-          controller.close();
-        } catch {
-          // The browser already closed the stream.
-        }
-      };
-      closeStream = close;
-      request.signal.addEventListener("abort", close, { once: true });
-      send({ type: "snapshot", snapshot: store.getSnapshot() });
-    },
-    cancel() {
-      closeStream?.();
-    },
+export async function startPairPlanServer(config: PairPlanServerConfig): Promise<PairPlanServerRuntime> {
+  const artifact = await resolveArtifactPath(config.artifactInput, config.configuredRoot);
+  const sessionId = sessionIdForPath(artifact.filePath);
+  const store = await SessionStore.open({
+    id: sessionId,
+    filePath: artifact.filePath,
+    rootPath: artifact.rootPath,
+    stateDir: config.stateDir,
   });
 
-  return new Response(stream, {
-    headers: {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache, no-transform",
-      connection: "keep-alive",
-    },
-  });
-}
-
-async function route(request: Request): Promise<Response> {
-  if (!isLocalRequest(request)) return text("Pair Plan only accepts loopback requests.", "text/plain; charset=utf-8", 403);
-
-  const url = new URL(request.url);
-  const pathname = url.pathname;
+  const clientRoot = join(dirname(fileURLToPath(import.meta.url)), "client");
+  const indexHtml = await readFile(join(clientRoot, "index.html"), "utf8");
+  const clientModule = await readFile(join(clientRoot, "app.ts"), "utf8");
+  const clientJavascript = new Bun.Transpiler({ loader: "ts", target: "browser" }).transformSync(clientModule);
+  const clientStyles = await readFile(join(clientRoot, "styles.css"), "utf8");
   const sessionPrefix = `/api/session/${store.id}`;
 
-  if (request.method === "GET" && pathname === "/health") {
-    return json({ ok: true, sessionId: store.id, revision: store.snapshot.artifactRevision });
-  }
+  let activeConnections = 0;
+  let lastActivity = Date.now();
+  let shuttingDown = false;
+  let server: ReturnType<typeof Bun.serve>;
+  let watcherTimer: ReturnType<typeof setInterval>;
+  let idleTimer: ReturnType<typeof setInterval>;
 
-  if (request.method === "GET" && pathname === "/") return text(indexHtml, "text/html; charset=utf-8");
-  if (request.method === "GET" && pathname === "/client/styles.css") return text(clientStyles, "text/css; charset=utf-8");
-  if (request.method === "GET" && pathname === "/client/app.ts") return text(clientJavascript, "text/javascript; charset=utf-8");
+  const touch = () => { lastActivity = Date.now(); };
+  const openConnection = () => { activeConnections += 1; touch(); };
+  const closeConnection = () => { activeConnections = Math.max(0, activeConnections - 1); touch(); };
 
-  if (request.method === "GET" && pathname === "/api/session") return json(sessionPayload());
-  if (pathname === "/api/session" || !pathname.startsWith(sessionPrefix)) return notFound();
+  function sseResponse(request: Request): Response {
+    let closeStream: (() => void) | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        openConnection();
+        const encoder = new TextEncoder();
+        let closed = false;
+        const send = (event: unknown) => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          } catch {
+            closeStream?.();
+          }
+        };
+        const unsubscribe = store.subscribe(send);
+        const heartbeat = setInterval(() => {
+          if (!closed) controller.enqueue(encoder.encode(": keep-alive\n\n"));
+        }, 15_000);
+        const close = () => {
+          if (closed) return;
+          closed = true;
+          clearInterval(heartbeat);
+          unsubscribe();
+          closeConnection();
+          try {
+            controller.close();
+          } catch {
+            // The browser already closed the stream.
+          }
+        };
+        closeStream = close;
+        request.signal.addEventListener("abort", close, { once: true });
+        send({ type: "snapshot", snapshot: store.getSnapshot() });
+      },
+      cancel() {
+        closeStream?.();
+      },
+    });
 
-  const artifactPrefix = `${sessionPrefix}/artifact`;
-  if (request.method === "GET" && (pathname === artifactPrefix || pathname.startsWith(`${artifactPrefix}/`))) {
-    const relativeAsset = pathname.slice(artifactPrefix.length).replace(/^\/+/, "");
-    const artifactPath = relativeAsset
-      ? await resolveSafeFile(artifact.rootPath, relativeAsset)
-      : artifact.filePath;
-    if (!artifactPath) return notFound("Artifact asset is outside the allowed root or does not exist.");
-    return new Response(Bun.file(artifactPath), {
+    return new Response(stream, {
       headers: {
-        "content-type": contentTypeFor(artifactPath),
-        "cache-control": "no-cache",
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive",
       },
     });
   }
 
-  if (request.method === "GET" && pathname === sessionPrefix) return json(store.getSnapshot());
-  if (request.method === "GET" && pathname === `${sessionPrefix}/events`) return sseResponse(request);
+  async function route(request: Request): Promise<Response> {
+    touch();
+    if (!isLocalRequest(request)) return text("Pair Plan only accepts loopback requests.", "text/plain; charset=utf-8", 403);
 
-  if (request.method === "GET" && pathname === `${sessionPrefix}/feedback/next`) {
-    const requestedTimeout = Number(url.searchParams.get("timeout") ?? 25_000);
-    const timeoutMs = Math.min(30_000, Math.max(1_000, Number.isFinite(requestedTimeout) ? requestedTimeout : 25_000));
-    try {
-      const envelope = await store.waitForFeedback(timeoutMs, request.signal);
-      return envelope ? json(envelope) : new Response(null, { status: 204 });
-    } catch (error) {
-      if (request.signal.aborted) return new Response(null, { status: 499 });
-      throw error;
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+
+    if (request.method === "GET" && pathname === "/health") {
+      return json({ ok: true, sessionId: store.id, revision: store.snapshot.artifactRevision, ended: Boolean(store.snapshot.endedAt) });
     }
-  }
 
-  if (request.method === "POST" && pathname === `${sessionPrefix}/feedback`) {
-    const payload = await parseJson(request);
-    if (!payload) return badRequest("Expected a JSON feedback payload.");
-    try {
-      const items = await store.enqueue(normalizeFeedbackList(payload));
-      return json({ queued: items, snapshot: store.getSnapshot() }, 201);
-    } catch (error) {
-      return badRequest(error instanceof Error ? error.message : "Invalid feedback payload.");
+    if (request.method === "GET" && pathname === "/") return text(indexHtml, "text/html; charset=utf-8");
+    if (request.method === "GET" && pathname === "/client/styles.css") return text(clientStyles, "text/css; charset=utf-8");
+    if (request.method === "GET" && pathname === "/client/app.ts") return text(clientJavascript, "text/javascript; charset=utf-8");
+    if (request.method === "GET" && pathname === "/api/session") return json(sessionPayload(store));
+    if (pathname === "/api/session" || !pathname.startsWith(sessionPrefix)) return notFound();
+
+    const artifactPrefix = `${sessionPrefix}/artifact`;
+    if (request.method === "GET" && (pathname === artifactPrefix || pathname.startsWith(`${artifactPrefix}/`))) {
+      const relativeAsset = pathname.slice(artifactPrefix.length).replace(/^\/+/, "");
+      const artifactPath = relativeAsset
+        ? await resolveSafeFile(artifact.rootPath, relativeAsset)
+        : artifact.filePath;
+      if (!artifactPath) return notFound("Artifact asset is outside the allowed root or does not exist.");
+      return new Response(Bun.file(artifactPath), {
+        headers: {
+          "content-type": contentTypeFor(artifactPath),
+          "cache-control": "no-cache",
+        },
+      });
     }
-  }
 
-  if (request.method === "POST" && pathname === `${sessionPrefix}/feedback/ack`) {
-    const payload = await parseJson(request);
-    if (!payload || typeof payload.batchId !== "string") return badRequest("batchId is required.");
-    try {
-      await store.acknowledge(payload.batchId);
+    if (request.method === "GET" && pathname === sessionPrefix) return json(store.getSnapshot());
+    if (request.method === "GET" && pathname === `${sessionPrefix}/events`) return sseResponse(request);
+
+    if (request.method === "GET" && pathname === `${sessionPrefix}/feedback/next`) {
+      const requestedTimeout = Number(url.searchParams.get("timeout") ?? 25_000);
+      const timeoutMs = Math.min(30_000, Math.max(1_000, Number.isFinite(requestedTimeout) ? requestedTimeout : 25_000));
+      openConnection();
+      try {
+        const result = await store.waitForFeedback(timeoutMs, request.signal);
+        return result ? json(result) : new Response(null, { status: 204 });
+      } catch (error) {
+        if (request.signal.aborted) return new Response(null, { status: 499 });
+        throw error;
+      } finally {
+        closeConnection();
+      }
+    }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/feedback`) {
+      if (store.snapshot.endedAt) return json({ error: "Session has ended; reopen it before sending feedback." }, 409);
+      const payload = await parseJson(request);
+      if (!payload) return badRequest("Expected a JSON feedback payload.");
+      try {
+        const items = await store.enqueue(normalizeFeedbackList(payload));
+        return json({ queued: items, snapshot: store.getSnapshot() }, 201);
+      } catch (error) {
+        return badRequest(error instanceof Error ? error.message : "Invalid feedback payload.");
+      }
+    }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/feedback/ack`) {
+      const payload = await parseJson(request);
+      if (!payload || typeof payload.batchId !== "string") return badRequest("batchId is required.");
+      try {
+        await store.acknowledge(payload.batchId);
+        return json({ ok: true, snapshot: store.getSnapshot() });
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : "Unknown delivery batch." }, 409);
+      }
+    }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/complete`) {
+      const payload = await parseJson(request);
+      if (!payload || typeof payload.batchId !== "string") return badRequest("batchId is required.");
+      try {
+        const message = await store.complete(payload.batchId, normalizeReply(payload));
+        return json({ message, snapshot: store.getSnapshot() });
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : "Unknown delivery batch." }, 409);
+      }
+    }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/reply`) {
+      const payload = await parseJson(request);
+      if (!payload) return badRequest("Expected a JSON reply payload.");
+      try {
+        const message = await store.recordReply(normalizeReply(payload));
+        return json({ message, snapshot: store.getSnapshot() });
+      } catch (error) {
+        return badRequest(error instanceof Error ? error.message : "Invalid agent reply.");
+      }
+    }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/status`) {
+      const payload = await parseJson(request);
+      const status = payload?.status;
+      if (status !== "listening" && status !== "working" && status !== "offline") return badRequest("status must be listening, working, or offline.");
+      await store.setAgentStatus(status as AgentStatus);
       return json({ ok: true, snapshot: store.getSnapshot() });
-    } catch (error) {
-      return json({ error: error instanceof Error ? error.message : "Unknown delivery batch." }, 409);
     }
-  }
 
-  if (request.method === "POST" && pathname === `${sessionPrefix}/reply`) {
-    const payload = await parseJson(request);
-    if (!payload) return badRequest("Expected a JSON reply payload.");
-    try {
-      const message = await store.recordReply(normalizeReply(payload));
-      return json({ message, snapshot: store.getSnapshot() });
-    } catch (error) {
-      return badRequest(error instanceof Error ? error.message : "Invalid agent reply.");
+    if (request.method === "POST" && pathname === `${sessionPrefix}/end`) {
+      const payload = await parseJson(request);
+      const by = payload?.by;
+      if (by !== undefined && by !== "agent" && by !== "user") return badRequest("by must be agent or user.");
+      await store.end((by as SessionEndBy | undefined) ?? "agent");
+      return json({ ok: true, snapshot: store.getSnapshot() });
     }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/reopen`) {
+      await store.reopen();
+      return json({ ok: true, snapshot: store.getSnapshot() });
+    }
+
+    return notFound();
   }
 
-  if (request.method === "POST" && pathname === `${sessionPrefix}/status`) {
-    const payload = await parseJson(request);
-    const status = payload?.status;
-    if (status !== "listening" && status !== "working" && status !== "offline") return badRequest("status must be listening, working, or offline.");
-    await store.setAgentStatus(status as AgentStatus);
-    return json({ ok: true, snapshot: store.getSnapshot() });
+  const stop = async (): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    clearInterval(watcherTimer);
+    clearInterval(idleTimer);
+    store.close();
+    await server.stop(true);
+  };
+
+  server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: config.port,
+    fetch: route,
+  });
+
+  watcherTimer = setInterval(() => {
+    void store.refreshArtifact().catch((error) => console.error("Artifact watcher error:", error));
+  }, 1_000);
+
+  idleTimer = setInterval(() => {
+    if (config.idleTimeoutMs <= 0 || activeConnections > 0 || Date.now() - lastActivity < config.idleTimeoutMs) return;
+    void stop();
+  }, 1_000);
+
+  if (config.installSignalHandlers) {
+    const onSignal = () => {
+      void stop().finally(() => process.exit(0));
+    };
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
   }
 
-  return notFound();
+  return { artifact, store, server, port: server.port ?? config.port, stop };
 }
 
-setInterval(() => {
-  void store.refreshArtifact().catch((error) => console.error("Artifact watcher error:", error));
-}, 1_000);
-
-const server = Bun.serve({
-  hostname: "127.0.0.1",
-  port,
-  fetch: route,
-});
-
-console.log(`Pair Plan listening at http://${server.hostname}:${server.port}`);
-console.log(`Reviewing ${artifact.filePath}`);
-console.log(`Session ${store.id}`);
+if (import.meta.main) {
+  try {
+    const runtime = await startPairPlanServer({ ...parseServerConfig(), installSignalHandlers: true });
+    console.log(`Pair Plan listening at http://127.0.0.1:${runtime.port}`);
+    console.log(`Reviewing ${runtime.artifact.filePath}`);
+    console.log(`Session ${runtime.store.id}`);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}

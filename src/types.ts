@@ -1,5 +1,7 @@
 export type AgentStatus = "listening" | "working" | "offline";
 
+export type SessionEndBy = "agent" | "user";
+
 export type SessionEventType = "snapshot" | "queue" | "artifact" | "presence" | "message";
 
 export interface TargetRef {
@@ -31,6 +33,25 @@ export interface FeedbackEnvelope {
   prompts: FeedbackItem[];
 }
 
+export interface FeedbackEnded {
+  sessionId: string;
+  file: string;
+  revision: number;
+  status: "ended";
+  endedAt: string;
+  endedBy: SessionEndBy;
+}
+
+export type FeedbackPollResult = FeedbackEnvelope | FeedbackEnded;
+
+export function isFeedbackEnded(value: FeedbackPollResult | null): value is FeedbackEnded {
+  return Boolean(value && "status" in value && value.status === "ended");
+}
+
+export function isFeedbackEnvelope(value: FeedbackPollResult | null): value is FeedbackEnvelope {
+  return Boolean(value && "batchId" in value);
+}
+
 export interface AgentReply {
   revision?: number;
   changedAnchors?: string[];
@@ -54,6 +75,8 @@ export interface SessionSnapshot {
   agentStatus: AgentStatus;
   updatedAt: string;
   deliveryBatchId: string | null;
+  endedAt?: string;
+  endedBy?: SessionEndBy;
 }
 
 export interface SessionEvent {
@@ -79,4 +102,6 @@ export interface StoredSessionState {
   history: HistoryMessage[];
   agentStatus: AgentStatus;
   updatedAt: string;
+  endedAt?: string;
+  endedBy?: SessionEndBy;
 }

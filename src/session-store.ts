@@ -6,12 +6,14 @@ import type {
   AgentStatus,
   DeliveryState,
   FeedbackEnvelope,
+  FeedbackPollResult,
   FeedbackInput,
   FeedbackItem,
   HistoryMessage,
   SessionEvent,
   SessionEventType,
   SessionSnapshot,
+  SessionEndBy,
   StoredSessionState,
 } from "./types";
 import { hashText } from "./path-safety";
@@ -25,7 +27,7 @@ interface SessionStoreOptions {
 
 type EventListener = (event: SessionEvent) => void;
 type FeedbackWaiter = {
-  resolve: (envelope: FeedbackEnvelope | null) => void;
+  resolve: (result: FeedbackPollResult | null) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   signal?: AbortSignal;
@@ -84,6 +86,8 @@ export class SessionStore {
       history: existing?.history ?? [],
       agentStatus: existing?.agentStatus ?? "listening",
       updatedAt: now(),
+      ...(existing?.endedAt ? { endedAt: existing.endedAt } : {}),
+      ...(existing?.endedBy ? { endedBy: existing.endedBy } : {}),
     };
 
     const store = new SessionStore(options, state);
@@ -105,6 +109,8 @@ export class SessionStore {
       agentStatus: this.state.agentStatus,
       updatedAt: this.state.updatedAt,
       deliveryBatchId: this.state.delivery?.batchId ?? null,
+      ...(this.state.endedAt ? { endedAt: this.state.endedAt } : {}),
+      ...(this.state.endedBy ? { endedBy: this.state.endedBy } : {}),
     };
   }
 
@@ -140,11 +146,12 @@ export class SessionStore {
     return queuedItems;
   }
 
-  async waitForFeedback(timeoutMs: number, signal?: AbortSignal): Promise<FeedbackEnvelope | null> {
+  async waitForFeedback(timeoutMs: number, signal?: AbortSignal): Promise<FeedbackPollResult | null> {
+    if (this.state.endedAt && this.state.endedBy) return this.endedEnvelope();
     if (this.state.delivery) return clone(this.state.delivery.envelope);
     if (this.state.queue.length > 0) return this.createDelivery();
 
-    return new Promise<FeedbackEnvelope | null>((resolve, reject) => {
+    return new Promise<FeedbackPollResult | null>((resolve, reject) => {
       const waiter: FeedbackWaiter = {
         resolve,
         reject,
@@ -164,17 +171,29 @@ export class SessionStore {
   }
 
   async acknowledge(batchId: string): Promise<void> {
-    if (!this.state.delivery || this.state.delivery.batchId !== batchId) {
-      throw new Error(`Unknown delivery batch: ${batchId}`);
-    }
-
-    const deliveredIds = new Set(this.state.delivery.envelope.prompts.map((item) => item.id));
-    this.state.queue = this.state.queue.filter((item) => !deliveredIds.has(item.id));
-    this.state.delivery = undefined;
-    this.addHistory("user", `Delivered ${deliveredIds.size} feedback item${deliveredIds.size === 1 ? "" : "s"} to the agent.`);
+    this.takeDelivery(batchId);
     await this.persist();
     this.publish("queue");
     this.publish("message");
+  }
+
+  async complete(batchId: string, reply: AgentReply): Promise<HistoryMessage> {
+    const deliveredIds = this.takeDelivery(batchId);
+    const userMessage = this.addHistory("user", `Delivered ${deliveredIds.length} feedback item${deliveredIds.length === 1 ? "" : "s"} to the agent.`);
+    if (typeof reply.revision === "number" && reply.revision > this.state.artifactRevision) {
+      this.state.artifactRevision = reply.revision;
+    }
+    this.state.agentStatus = "listening";
+    const detail = reply.changedAnchors?.length
+      ? ` Changed anchors: ${reply.changedAnchors.join(", ")}.`
+      : "";
+    const agentMessage = this.addHistory("agent", `${reply.summary}${detail}`);
+    await this.persist();
+    this.publish("queue");
+    this.publish("message", userMessage);
+    this.publish("message", agentMessage);
+    this.publish("presence");
+    return agentMessage;
   }
 
   async recordReply(reply: AgentReply): Promise<HistoryMessage> {
@@ -196,6 +215,34 @@ export class SessionStore {
     this.state.agentStatus = status;
     await this.persist();
     this.publish("presence");
+  }
+
+  async end(by: SessionEndBy = "agent"): Promise<void> {
+    if (!this.state.endedAt) {
+      this.state.endedAt = now();
+      this.state.endedBy = by;
+    }
+    this.state.agentStatus = "offline";
+    await this.persist();
+    this.publish("presence");
+    this.resolveWaiters();
+  }
+
+  async reopen(): Promise<void> {
+    this.state.endedAt = undefined;
+    this.state.endedBy = undefined;
+    this.state.agentStatus = "listening";
+    await this.persist();
+    this.publish("presence");
+  }
+
+  close(): void {
+    const error = new Error("Pair Plan session store closed");
+    for (const waiter of [...this.waiters]) {
+      this.removeWaiter(waiter);
+      waiter.reject(error);
+    }
+    this.listeners.clear();
   }
 
   async refreshArtifact(): Promise<boolean> {
@@ -232,10 +279,13 @@ export class SessionStore {
   }
 
   private resolveWaiters(): void {
-    if (this.state.queue.length === 0 || this.waiters.size === 0) return;
+    if (this.waiters.size === 0 || (!this.state.endedAt && this.state.queue.length === 0)) return;
     const waiters = [...this.waiters];
     this.waiters.clear();
-    void this.createDelivery().then((envelope) => {
+    const resultPromise = this.state.endedAt && this.state.endedBy
+      ? Promise.resolve(this.endedEnvelope())
+      : this.createDelivery();
+    void resultPromise.then((envelope) => {
       for (const waiter of waiters) {
         clearTimeout(waiter.timer);
         if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
@@ -266,6 +316,30 @@ export class SessionStore {
     this.state.history = this.state.history.slice(0, 50);
     this.state.updatedAt = message.createdAt;
     return message;
+  }
+
+  private takeDelivery(batchId: string): FeedbackItem[] {
+    if (!this.state.delivery || this.state.delivery.batchId !== batchId) {
+      throw new Error(`Unknown delivery batch: ${batchId}`);
+    }
+
+    const deliveredItems = this.state.delivery.envelope.prompts;
+    const deliveredIds = new Set(deliveredItems.map((item) => item.id));
+    this.state.queue = this.state.queue.filter((item) => !deliveredIds.has(item.id));
+    this.state.delivery = undefined;
+    return deliveredItems;
+  }
+
+  private endedEnvelope(): Extract<FeedbackPollResult, { status: "ended" }> {
+    if (!this.state.endedAt || !this.state.endedBy) throw new Error("Ended session is missing end metadata.");
+    return {
+      sessionId: this.state.id,
+      file: this.state.filePath,
+      revision: this.state.artifactRevision,
+      status: "ended",
+      endedAt: this.state.endedAt,
+      endedBy: this.state.endedBy,
+    };
   }
 
   private publish(type: SessionEventType, message?: HistoryMessage): void {

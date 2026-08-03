@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { SessionStore } from "../src/session-store";
+import { isFeedbackEnded, isFeedbackEnvelope } from "../src/types";
 
 async function createStore() {
   const directory = await mkdtemp(join(tmpdir(), "pair-plan-test-"));
@@ -38,9 +39,11 @@ describe("SessionStore", () => {
       await store.enqueue([{ target: { anchor: "north-star" }, body: "Keep the shell stable." }]);
       const first = await store.waitForFeedback(100);
       const second = await store.waitForFeedback(100);
-      expect(first?.batchId).toBeDefined();
-      expect(second?.batchId).toBe(first?.batchId);
-      await store.acknowledge(first!.batchId);
+      expect(isFeedbackEnvelope(first)).toBe(true);
+      expect(isFeedbackEnvelope(second)).toBe(true);
+      if (!isFeedbackEnvelope(first) || !isFeedbackEnvelope(second)) throw new Error("Expected feedback envelopes.");
+      expect(second.batchId).toBe(first.batchId);
+      await store.acknowledge(first.batchId);
       expect(store.snapshot.queue).toHaveLength(0);
       expect(store.snapshot.deliveryBatchId).toBeNull();
     } finally {
@@ -55,6 +58,46 @@ describe("SessionStore", () => {
       await writeFile(artifactPath, "<main><h1>Updated plan</h1></main>", "utf8");
       expect(await store.refreshArtifact()).toBe(true);
       expect(store.snapshot.artifactRevision).toBe(initialRevision + 1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("completes a delivery atomically and records both sides of the exchange", async () => {
+    const { directory, store } = await createStore();
+    try {
+      await store.enqueue([{ target: { anchor: "commands" }, body: "Make the command ergonomic." }]);
+      const envelope = await store.waitForFeedback(100);
+      if (!isFeedbackEnvelope(envelope)) throw new Error("Expected a feedback envelope.");
+
+      const message = await store.complete(envelope.batchId, {
+        revision: 2,
+        changedAnchors: ["commands"],
+        summary: "Added a concise command surface.",
+      });
+
+      expect(message.role).toBe("agent");
+      expect(store.snapshot.queue).toHaveLength(0);
+      expect(store.snapshot.deliveryBatchId).toBeNull();
+      expect(store.snapshot.artifactRevision).toBe(2);
+      expect(store.snapshot.history.map((item) => item.role)).toEqual(["agent", "user"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("returns a terminal poll result after a session ends", async () => {
+    const { directory, store } = await createStore();
+    try {
+      await store.end("agent");
+      const result = await store.waitForFeedback(100);
+      expect(isFeedbackEnded(result)).toBe(true);
+      if (!isFeedbackEnded(result)) throw new Error("Expected an ended poll result.");
+      expect(result.endedBy).toBe("agent");
+      expect(store.snapshot.endedAt).toBeDefined();
+      await store.reopen();
+      expect(store.snapshot.endedAt).toBeUndefined();
+      expect(store.snapshot.agentStatus).toBe("listening");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

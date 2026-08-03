@@ -2,7 +2,12 @@
   "name": "pair-plan",
   "private": true,
   "type": "module",
+  "bin": {
+    "pair-plan": "src/cli.ts"
+  },
   "scripts": {
+    "build": "bun build src/cli.ts --outfile dist/cli.js --target bun",
+    "cli": "bun run src/cli.ts",
     "dev": "bun run src/server.ts",
     "start": "bun run src/server.ts",
     "test": "bun test",

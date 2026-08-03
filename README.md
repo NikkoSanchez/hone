@@ -10,6 +10,37 @@ bun run dev -- pair-plan-review-artifact.html
 
 Then open <http://127.0.0.1:8765>.
 
+## CLI agent loop
+
+The Bun CLI is the agent-facing adapter. It keeps the server/session details path-based so an agent does not need to discover IDs or construct HTTP requests by hand:
+
+```sh
+# Start or resume the local review session without opening another browser.
+bun run cli -- pair-plan-review-artifact.html --no-open
+
+# Keep this command attached to the active agent turn.
+bun run cli -- poll pair-plan-review-artifact.html
+
+# After editing the artifact, complete the exact batch atomically.
+bun run cli -- complete pair-plan-review-artifact.html \
+  --batch-id BATCH_ID \
+  --summary "Clarified the server lifecycle." \
+  --revision 2 \
+  --changed runtime
+```
+
+For a linked local executable, run `bun link` from this package and use `pair-plan ...` instead. `poll` waits until a reviewer sends feedback; if the agent task ends, queued feedback remains durable but the CLI does not create a new Codex task by itself.
+
+Useful lifecycle commands:
+
+```sh
+bun run cli -- status
+bun run cli -- end pair-plan-review-artifact.html
+bun run cli -- stop pair-plan-review-artifact.html
+```
+
+The CLI uses a single healthy daemon per artifact/state directory, cleans up on `stop` or process signals, and recovers stale runtime records. Idle shutdown defaults to 30 minutes and can be disabled with `--idle-timeout-ms 0`.
+
 Useful options:
 
 ```sh
@@ -50,10 +81,10 @@ curl -X POST http://127.0.0.1:8765/api/session/SESSION_ID/reply \
 
 The browser receives artifact reload, presence, queue, and history events over SSE at `/api/session/SESSION_ID/events`.
 
-`src/agent-client.ts` contains a small TypeScript client for wrapping this poll → process → acknowledge → reply loop.
+`src/agent-client.ts` contains the TypeScript client behind the CLI poll → process → complete loop. The server also keeps the older individual acknowledgement and reply endpoints for protocol compatibility.
 
 ## First pass boundaries
 
 - Plain TypeScript and DOM modules are intentional; React is deferred.
-- Agent handoff uses long polling. Browser reload and presence use SSE.
+- Agent handoff uses the CLI over long polling. Browser reload and presence use SSE.
 - Layout diagnostics, WebSockets, whiteboards, and artifact authoring are later slices.

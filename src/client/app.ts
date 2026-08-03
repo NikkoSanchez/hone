@@ -52,6 +52,7 @@ const artifactLoading = $("#artifactLoading") as HTMLDivElement;
 const feedbackBody = $("#feedbackBody") as HTMLTextAreaElement;
 const queueList = $("#queueList") as HTMLDivElement;
 const historyList = $("#historyList") as HTMLDivElement;
+const sectionList = $("#sectionList") as HTMLElement;
 const quotePreview = $("#quotePreview") as HTMLDivElement;
 const toast = $("#toast") as HTMLDivElement;
 
@@ -221,10 +222,29 @@ function showSelectedTarget(target: SelectedTarget | null): void {
   }
 }
 
+function renderArtifactSections(documentRef: Document): void {
+  const seen = new Set<string>();
+  const sections = [...documentRef.querySelectorAll<HTMLElement>("[data-anchor]")]
+    .map((element) => {
+      const anchor = element.dataset.anchor?.trim() ?? "";
+      const label = element.dataset.label?.trim()
+        || element.querySelector("h1, h2, h3, h4")?.textContent?.trim().replace(/\s+/g, " ")
+        || anchor;
+      return { anchor, label };
+    })
+    .filter(({ anchor }) => Boolean(anchor) && !seen.has(anchor) && Boolean(seen.add(anchor)))
+    .slice(0, 16);
+
+  sectionList.innerHTML = sections.length
+    ? sections.map(({ anchor, label }, index) => `<button type="button" data-anchor="${escapeHtml(anchor)}">${String(index + 1).padStart(2, "0")} <span>${escapeHtml(label)}</span></button>`).join("")
+    : `<span class="section-list-empty">No artifact anchors found</span>`;
+}
+
 function installArtifactHooks(): void {
   const documentRef = frame.contentDocument;
   if (!documentRef) return;
   artifactLoading.classList.add("is-hidden");
+  renderArtifactSections(documentRef);
   const style = documentRef.createElement("style");
   style.textContent = `[data-pair-plan-target]{outline:2px solid #1eb9b0 !important;outline-offset:3px !important;}`;
   documentRef.head.appendChild(style);
@@ -395,7 +415,10 @@ async function boot(): Promise<void> {
       setView("queue");
     }
   }));
-  $$<HTMLButtonElement>("[data-anchor]").forEach((button) => button.addEventListener("click", () => scrollToAnchor(button.dataset.anchor ?? "")));
+  sectionList.addEventListener("click", (event) => {
+    const button = (event.target as Element).closest<HTMLButtonElement>("button[data-anchor]");
+    if (button) scrollToAnchor(button.dataset.anchor ?? "");
+  });
   feedbackBody.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();

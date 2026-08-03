@@ -29,14 +29,7 @@
         <button class="nav-item is-active" type="button" data-nav="canvas">◉ <span>Plan canvas</span></button>
         <button class="nav-item" type="button" data-nav="queue">✦ <span>Feedback queue</span><b id="sidebarQueueCount">0</b></button>
         <div class="sidebar-label section-label">PLAN SECTIONS</div>
-        <nav class="section-list" aria-label="Plan sections">
-          <button type="button" data-anchor="north-star">01 <span>North star</span></button>
-          <button type="button" data-anchor="loop">02 <span>The loop</span></button>
-          <button type="button" data-anchor="runtime">03 <span>Runtime shape</span></button>
-          <button type="button" data-anchor="scope">04 <span>MVP boundary</span></button>
-          <button type="button" data-anchor="decisions">05 <span>Decisions made</span></button>
-          <button type="button" data-anchor="sequence">06 <span>Build sequence</span></button>
-        </nav>
+        <nav class="section-list" id="sectionList" aria-label="Plan sections"></nav>
         <div class="sidebar-footer"><span class="live-dot"></span><strong id="sidebarStatus">Agent listening</strong><p id="sidebarStatusDetail">The agent can wait on the next long poll.</p></div>
       </aside>
 

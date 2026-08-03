@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Pair Plan · Local review loop</title>
+    <link rel="stylesheet" href="/client/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell" id="appShell">
+      <header class="topbar">
+        <div class="brand-mark" aria-hidden="true">↗</div>
+        <div class="brand-copy"><strong>Pair Plan</strong><span>local review loop</span></div>
+        <div class="session-chip">
+          <span class="state-dot" id="topStatusDot"></span>
+          <span>Agent session</span>
+          <code id="sessionId">loading…</code>
+          <span class="revision-pill" id="revisionLabel">rev —</span>
+        </div>
+        <div class="top-actions">
+          <span class="local-pill">127.0.0.1 only</span>
+          <button class="icon-button mobile-only" id="openPanel" type="button" aria-label="Open feedback panel">☷</button>
+        </div>
+      </header>
+
+      <aside class="sidebar" aria-label="Session navigation">
+        <div class="sidebar-label">SESSION</div>
+        <button class="nav-item is-active" type="button" data-nav="canvas">◉ <span>Plan canvas</span></button>
+        <button class="nav-item" type="button" data-nav="queue">✦ <span>Feedback queue</span><b id="sidebarQueueCount">0</b></button>
+        <div class="sidebar-label section-label">PLAN SECTIONS</div>
+        <nav class="section-list" aria-label="Plan sections">
+          <button type="button" data-anchor="north-star">01 <span>North star</span></button>
+          <button type="button" data-anchor="loop">02 <span>The loop</span></button>
+          <button type="button" data-anchor="runtime">03 <span>Runtime shape</span></button>
+          <button type="button" data-anchor="scope">04 <span>MVP boundary</span></button>
+          <button type="button" data-anchor="decisions">05 <span>Decisions made</span></button>
+          <button type="button" data-anchor="sequence">06 <span>Build sequence</span></button>
+        </nav>
+        <div class="sidebar-footer"><span class="live-dot"></span><strong id="sidebarStatus">Agent listening</strong><p id="sidebarStatusDetail">The agent can wait on the next long poll.</p></div>
+      </aside>
+
+      <main class="workspace">
+        <div class="workspace-toolbar">
+          <div class="artifact-location"><span>ARTIFACT</span><strong id="artifactFile">loading…</strong></div>
+          <div class="toolbar-actions">
+            <button class="mode-button is-active" type="button" data-mode="annotate">Annotate</button>
+            <button class="mode-button" type="button" data-mode="explore">Explore</button>
+            <button class="icon-button" id="reloadArtifact" type="button" aria-label="Reload artifact">↻</button>
+          </div>
+        </div>
+        <div class="artifact-stage">
+          <iframe id="artifactFrame" title="Reviewed artifact"></iframe>
+          <div class="artifact-loading" id="artifactLoading">Loading artifact…</div>
+        </div>
+      </main>
+
+      <aside class="right-rail" id="rightRail" aria-label="Feedback queue and conversation">
+        <div class="rail-header">
+          <div><strong>Conversation</strong><span class="queue-badge" id="queueCount">0</span></div>
+          <span class="agent-state"><span class="state-dot" id="railStatusDot"></span><span id="agentStatus">Listening</span></span>
+        </div>
+        <div class="rail-tabs" role="tablist" aria-label="Conversation views">
+          <button class="rail-tab is-active" type="button" data-view="queue">Queue <span id="queueTabCount">0</span></button>
+          <button class="rail-tab" type="button" data-view="history">History</button>
+        </div>
+
+        <section class="rail-view" id="queueView">
+          <div class="feed-label">LOCAL QUEUE</div>
+          <div id="queueList" class="queue-list"><div class="empty-state">No comments queued yet.</div></div>
+          <div class="composer">
+            <div class="target-line"><span>↗ Targeting</span><strong id="targetLabel">No target selected</strong><button id="clearTarget" type="button" aria-label="Clear target">×</button></div>
+            <div class="quote-preview" id="quotePreview" hidden></div>
+            <textarea id="feedbackBody" placeholder="Tell the agent what to change…" aria-label="Feedback message"></textarea>
+            <div class="composer-toolbar"><span>Enter queues · Shift+Enter newline</span><button class="queue-button" id="queueComment" type="button">Queue comment</button></div>
+            <div class="send-row"><button class="send-button" id="sendQueue" type="button" disabled>Send to Agent</button><button class="end-button" id="sendEnd" type="button" disabled>Send &amp; end</button></div>
+          </div>
+        </section>
+
+        <section class="rail-view" id="historyView" hidden>
+          <div class="feed-label">DELIVERED HISTORY</div>
+          <div id="historyList" class="history-list"></div>
+        </section>
+        <div class="rail-footer">Comments stay local until Send to Agent. The agent receives one feedback envelope, then returns a compact revision result.</div>
+      </aside>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/client/app.ts"></script>
+  </body>
+</html>

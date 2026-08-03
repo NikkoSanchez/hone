@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+.pair-plan/
+.env
+.env.*
+*.log
+.DS_Store

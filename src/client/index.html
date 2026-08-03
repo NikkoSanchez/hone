@@ -13,7 +13,7 @@
         <div class="brand-mark" aria-hidden="true">↗</div>
         <div class="brand-copy"><strong>Pair Plan</strong><span>local review loop</span></div>
         <div class="session-chip">
-          <span class="state-dot" id="topStatusDot"></span>
+          <span class="state-dot is-offline" id="topStatusDot"></span>
           <span>Agent session</span>
           <code id="sessionId">loading…</code>
           <span class="revision-pill" id="revisionLabel">rev —</span>
@@ -30,7 +30,7 @@
         <button class="nav-item" type="button" data-nav="queue">✦ <span>Feedback queue</span><b id="sidebarQueueCount">0</b></button>
         <div class="sidebar-label section-label">PLAN SECTIONS</div>
         <nav class="section-list" id="sectionList" aria-label="Plan sections"></nav>
-        <div class="sidebar-footer"><span class="live-dot"></span><strong id="sidebarStatus">Agent listening</strong><p id="sidebarStatusDetail">The agent can wait on the next long poll.</p></div>
+        <div class="sidebar-footer"><span class="live-dot is-offline" id="sidebarStatusDot"></span><strong id="sidebarStatus">Agent offline</strong><p id="sidebarStatusDetail">Feedback will remain queued until an agent polls.</p></div>
       </aside>
 
       <main class="workspace">
@@ -51,7 +51,7 @@
       <aside class="right-rail" id="rightRail" aria-label="Feedback queue and conversation">
         <div class="rail-header">
           <div><strong>Conversation</strong><span class="queue-badge" id="queueCount">0</span></div>
-          <span class="agent-state"><span class="state-dot" id="railStatusDot"></span><span id="agentStatus">Listening</span></span>
+          <span class="agent-state"><span class="state-dot is-offline" id="railStatusDot"></span><span id="agentStatus">Offline</span></span>
         </div>
         <div class="rail-tabs" role="tablist" aria-label="Conversation views">
           <button class="rail-tab is-active" type="button" data-view="queue">Queue <span id="queueTabCount">0</span></button>

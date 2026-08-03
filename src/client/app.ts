@@ -94,9 +94,9 @@ function setStatusVisual(status: AgentStatus): void {
   $("#sidebarStatusDetail")!.textContent = status === "working"
     ? "The agent is processing the latest envelope."
     : status === "offline"
-      ? "The session is ended until the agent reconnects."
+      ? "Feedback stays queued until an agent starts polling."
       : "The agent can wait on the next long poll.";
-  for (const dot of [$("#topStatusDot"), $("#railStatusDot")]) {
+  for (const dot of [$("#topStatusDot"), $("#sidebarStatusDot"), $("#railStatusDot")]) {
     dot?.classList.toggle("is-working", status === "working");
     dot?.classList.toggle("is-offline", status === "offline");
   }

@@ -57,6 +57,9 @@ Agent loop:
   pair-plan plan.html --no-open
   pair-plan poll plan.html
   pair-plan complete plan.html --batch-id BATCH_ID --summary "Updated the plan" --revision 2
+
+Successful open and complete responses include the exact next_command. Keep
+following it until poll returns an ended session.
 `;
 
 interface ParsedArgs {
@@ -146,6 +149,18 @@ function output(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
+function shellArgument(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function commandContext(current: CliContext): string {
+  return `${shellArgument(current.artifactPath)} --root ${shellArgument(current.rootPath)} --state-dir ${shellArgument(current.stateDir)} --port ${current.port}`;
+}
+
+function pollCommand(current: CliContext): string {
+  return `pair-plan poll ${commandContext(current)}`;
+}
+
 function openReviewUrl(url: string): void {
   if (process.platform === "darwin") {
     Bun.spawn(["open", url], { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true });
@@ -196,6 +211,7 @@ async function runOpen(args: string[]): Promise<void> {
     url,
     port: current.port,
     ended_at: current.handle.session.endedAt,
+    ...(!current.handle.session.endedAt ? { next_command: pollCommand(current) } : {}),
   });
 }
 
@@ -203,7 +219,6 @@ async function runPoll(args: string[]): Promise<void> {
   const current = await context(args);
   if (!current) return;
   const client = new PairPlanAgentClient(current.handle.baseUrl, current.handle.session.id);
-  if (!current.handle.session.endedAt) await client.status("listening");
 
   const controller = new AbortController();
   const onSignal = () => controller.abort();
@@ -223,7 +238,7 @@ async function runPoll(args: string[]): Promise<void> {
       output({
         ...result,
         status: "feedback",
-        next_command: `pair-plan complete "${current.artifactPath}" --batch-id ${result.batchId} --summary "<summary>" --revision ${result.revision}`,
+        next_command: `pair-plan complete ${commandContext(current)} --batch-id ${shellArgument(result.batchId)} --summary '<summary>' --revision ${result.revision}`,
       });
       return;
     }
@@ -247,7 +262,7 @@ async function runComplete(args: string[]): Promise<void> {
   };
   const client = new PairPlanAgentClient(current.handle.baseUrl, current.handle.session.id);
   await client.complete(batchId, reply);
-  output({ status: "completed", artifact: current.artifactPath, batch_id: batchId, ...reply });
+  output({ status: "completed", artifact: current.artifactPath, batch_id: batchId, ...reply, next_command: pollCommand(current) });
 }
 
 async function runStatus(args: string[]): Promise<void> {

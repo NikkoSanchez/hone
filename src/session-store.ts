@@ -25,6 +25,8 @@ interface SessionStoreOptions {
   stateDir: string;
 }
 
+const POLL_OFFLINE_GRACE_MS = 500;
+
 type EventListener = (event: SessionEvent) => void;
 type FeedbackWaiter = {
   resolve: (result: FeedbackPollResult | null) => void;
@@ -56,6 +58,7 @@ export class SessionStore {
   private state: StoredSessionState;
   private readonly listeners = new Set<EventListener>();
   private readonly waiters = new Set<FeedbackWaiter>();
+  private pollOfflineTimer: ReturnType<typeof setTimeout> | undefined;
   private writeChain: Promise<void> = Promise.resolve();
 
   private constructor(options: SessionStoreOptions, state: StoredSessionState) {
@@ -84,7 +87,10 @@ export class SessionStore {
       queue: existing?.queue ?? [],
       delivery: existing?.delivery,
       history: existing?.history ?? [],
-      agentStatus: existing?.agentStatus ?? "listening",
+      // Presence describes a live agent connection, not merely a healthy
+      // server or a previously-open session. A fresh server has no active
+      // feedback poll yet, even when persisted state said "listening".
+      agentStatus: "offline",
       updatedAt: now(),
       ...(existing?.endedAt ? { endedAt: existing.endedAt } : {}),
       ...(existing?.endedBy ? { endedBy: existing.endedBy } : {}),
@@ -148,7 +154,12 @@ export class SessionStore {
 
   async waitForFeedback(timeoutMs: number, signal?: AbortSignal): Promise<FeedbackPollResult | null> {
     if (this.state.endedAt && this.state.endedBy) return this.endedEnvelope();
-    if (this.state.delivery) return clone(this.state.delivery.envelope);
+    this.cancelPollOffline();
+    if (this.state.delivery) {
+      await this.setAgentStatus("working");
+      return clone(this.state.delivery.envelope);
+    }
+    await this.setAgentStatus("listening");
     if (this.state.queue.length > 0) return this.createDelivery();
 
     return new Promise<FeedbackPollResult | null>((resolve, reject) => {
@@ -157,12 +168,14 @@ export class SessionStore {
         reject,
         timer: setTimeout(() => {
           this.removeWaiter(waiter);
+          this.schedulePollOffline();
           resolve(null);
         }, timeoutMs),
         signal,
       };
       waiter.onAbort = () => {
         this.removeWaiter(waiter);
+        this.schedulePollOffline();
         reject(new Error("Feedback poll aborted"));
       };
       signal?.addEventListener("abort", waiter.onAbort, { once: true });
@@ -183,7 +196,7 @@ export class SessionStore {
     if (typeof reply.revision === "number" && reply.revision > this.state.artifactRevision) {
       this.state.artifactRevision = reply.revision;
     }
-    this.state.agentStatus = "listening";
+    this.state.agentStatus = "offline";
     const detail = reply.changedAnchors?.length
       ? ` Changed anchors: ${reply.changedAnchors.join(", ")}.`
       : "";
@@ -200,7 +213,7 @@ export class SessionStore {
     if (typeof reply.revision === "number" && reply.revision > this.state.artifactRevision) {
       this.state.artifactRevision = reply.revision;
     }
-    this.state.agentStatus = "listening";
+    this.state.agentStatus = "offline";
     const detail = reply.changedAnchors?.length
       ? ` Changed anchors: ${reply.changedAnchors.join(", ")}.`
       : "";
@@ -212,6 +225,7 @@ export class SessionStore {
   }
 
   async setAgentStatus(status: AgentStatus): Promise<void> {
+    if (this.state.agentStatus === status) return;
     this.state.agentStatus = status;
     await this.persist();
     this.publish("presence");
@@ -231,12 +245,13 @@ export class SessionStore {
   async reopen(): Promise<void> {
     this.state.endedAt = undefined;
     this.state.endedBy = undefined;
-    this.state.agentStatus = "listening";
+    this.state.agentStatus = "offline";
     await this.persist();
     this.publish("presence");
   }
 
   close(): void {
+    this.cancelPollOffline();
     const error = new Error("Pair Plan session store closed");
     for (const waiter of [...this.waiters]) {
       this.removeWaiter(waiter);
@@ -303,6 +318,21 @@ export class SessionStore {
     this.waiters.delete(waiter);
     clearTimeout(waiter.timer);
     if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+  }
+
+  private cancelPollOffline(): void {
+    if (!this.pollOfflineTimer) return;
+    clearTimeout(this.pollOfflineTimer);
+    this.pollOfflineTimer = undefined;
+  }
+
+  private schedulePollOffline(): void {
+    this.cancelPollOffline();
+    this.pollOfflineTimer = setTimeout(() => {
+      this.pollOfflineTimer = undefined;
+      if (this.waiters.size > 0 || this.state.delivery || this.state.endedAt) return;
+      void this.setAgentStatus("offline");
+    }, POLL_OFFLINE_GRACE_MS);
   }
 
   private addHistory(role: HistoryMessage["role"], body: string): HistoryMessage {

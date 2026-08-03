@@ -47,7 +47,6 @@ export class PairPlanAgentClient {
   }
 
   async run(handler: FeedbackHandler, options: AgentLoopOptions = {}): Promise<void> {
-    await this.status("listening");
     while (!options.signal?.aborted) {
       const envelope = await this.nextFeedback(options);
       if (!envelope) continue;

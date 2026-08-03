@@ -29,6 +29,12 @@ bun run cli -- complete pair-plan-review-artifact.html \
   --changed runtime
 ```
 
+Successful `open` and `complete` responses include an exact `next_command` that
+returns the agent to `poll`. Keep following that command in the active agent
+turn until the reviewer ends the session. The browser reports `listening` only
+while a feedback poll is actually connected; feedback sent while the agent is
+offline remains durable for the next poll.
+
 For a linked local executable, run `bun link` from this package and use `pair-plan ...` instead. `poll` waits until a reviewer sends feedback; if the agent task ends, queued feedback remains durable but the CLI does not create a new Codex task by itself.
 
 Useful lifecycle commands:

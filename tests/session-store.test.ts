@@ -19,6 +19,41 @@ async function createStore() {
 }
 
 describe("SessionStore", () => {
+  test("derives agent presence from the feedback poll lifecycle", async () => {
+    const { directory, store } = await createStore();
+    try {
+      expect(store.snapshot.agentStatus).toBe("offline");
+
+      const poll = store.waitForFeedback(2_000);
+      await Bun.sleep(10);
+      expect(store.snapshot.agentStatus).toBe("listening");
+
+      await store.enqueue([{ target: { anchor: "presence" }, body: "Keep presence honest." }]);
+      const envelope = await poll;
+      if (!isFeedbackEnvelope(envelope)) throw new Error("Expected a feedback envelope.");
+      expect(store.snapshot.agentStatus).toBe("working");
+
+      await store.complete(envelope.batchId, { summary: "Presence now follows the active poll." });
+      expect(store.snapshot.agentStatus).toBe("offline");
+    } finally {
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("marks the agent offline after polling stops", async () => {
+    const { directory, store } = await createStore();
+    try {
+      expect(await store.waitForFeedback(10)).toBeNull();
+      expect(store.snapshot.agentStatus).toBe("listening");
+      await Bun.sleep(550);
+      expect(store.snapshot.agentStatus).toBe("offline");
+    } finally {
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("replaces a queued item with the same queue key", async () => {
     const { directory, store } = await createStore();
     try {
@@ -97,7 +132,7 @@ describe("SessionStore", () => {
       expect(store.snapshot.endedAt).toBeDefined();
       await store.reopen();
       expect(store.snapshot.endedAt).toBeUndefined();
-      expect(store.snapshot.agentStatus).toBe("listening");
+      expect(store.snapshot.agentStatus).toBe("offline");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

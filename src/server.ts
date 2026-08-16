@@ -58,8 +58,10 @@ export function parseServerConfig(args: string[] = Bun.argv.slice(2)): PairPlanS
   const argv = args.filter((argument) => argument !== "--");
   const artifactInput = argumentValue(argv, "--artifact")
     ?? argv.find((argument) => !argument.startsWith("-"))
-    ?? Bun.env.PAIR_PLAN_ARTIFACT
-    ?? join(process.cwd(), "pair-plan-review-artifact.html");
+    ?? Bun.env.PAIR_PLAN_ARTIFACT;
+  if (!artifactInput) {
+    throw new Error("An artifact path is required. Pass one as an argument or set PAIR_PLAN_ARTIFACT.");
+  }
   const configuredRoot = argumentValue(argv, "--root") ?? Bun.env.PAIR_PLAN_ARTIFACT_ROOT;
   const stateDir = resolve(argumentValue(argv, "--state-dir") ?? Bun.env.PAIR_PLAN_STATE_DIR ?? defaultStateDir());
   const port = Math.max(1, Math.min(65_535, Math.floor(parseNumber(argumentValue(argv, "--port") ?? Bun.env.PAIR_PLAN_PORT, DEFAULT_PORT))));

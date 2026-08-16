@@ -5,10 +5,12 @@ Pair Plan is a local-first review shell for agent-edited HTML artifacts. The app
 ## Run it
 
 ```sh
-bun run dev -- pair-plan-review-artifact.html
+bun run dev -- examples/review-plan.html
 ```
 
 Then open <http://127.0.0.1:8765>.
+
+`examples/review-plan.html` is a small, self-contained reference artifact rather than a visual template. It demonstrates labeled section anchors, granular nested targets, text selection, and an Explore-mode control without duplicating Pair Plan's navigation.
 
 ## CLI agent loop
 
@@ -16,13 +18,13 @@ The Bun CLI is the agent-facing adapter. It keeps the server/session details pat
 
 ```sh
 # Start or resume the local review session without opening another browser.
-bun run cli -- pair-plan-review-artifact.html --no-open
+bun run cli -- plan.html --no-open
 
 # Keep this command attached to the active agent turn.
-bun run cli -- poll pair-plan-review-artifact.html
+bun run cli -- poll plan.html
 
 # After editing the artifact, complete the exact batch atomically.
-bun run cli -- complete pair-plan-review-artifact.html \
+bun run cli -- complete plan.html \
   --batch-id BATCH_ID \
   --summary "Clarified the server lifecycle." \
   --revision 2 \
@@ -40,10 +42,15 @@ For a linked local executable, run `bun link` from this package and use `pair-pl
 Useful lifecycle commands:
 
 ```sh
+bun run cli -- recent --limit 10
 bun run cli -- status
-bun run cli -- end pair-plan-review-artifact.html
-bun run cli -- stop pair-plan-review-artifact.html
+bun run cli -- end plan.html
+bun run cli -- stop plan.html
 ```
+
+`recent` reads the durable session history without starting a server. It prints
+one `YYYY-MM-DD  artifact-path` line per known, still-existing artifact,
+newest-first, so stopped review sessions remain discoverable at a glance.
 
 The CLI uses a single healthy daemon per artifact/state directory, cleans up on `stop` or process signals, and recovers stale runtime records. Idle shutdown defaults to 30 minutes and can be disabled with `--idle-timeout-ms 0`.
 

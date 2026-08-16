@@ -61,6 +61,8 @@ let localQueue: FeedbackItem[] = [];
 let selectedTarget: SelectedTarget | null = null;
 let mode: "annotate" | "explore" = "annotate";
 let toastTimer: number | undefined;
+let ignoreNextArtifactClick = false;
+let hoveredArtifactElement: Element | null = null;
 
 function escapeHtml(value: unknown): string {
   return String(value).replace(/[&<>"']/g, (character) => ({
@@ -180,11 +182,10 @@ function targetElementFromNode(node: EventTarget | Node | null, documentRef: Doc
     ? candidate
     : candidate?.parentElement ?? null;
   if (!element || element === documentRef.body || element === documentRef.documentElement) return null;
-  // Prefer the artifact's explicit anchor/id over a nested heading or
-  // paragraph so a click inside a reviewable card stays attached to the card.
-  return element.closest("[data-anchor], [id]")
-    ?? element.closest("section, article, main, header, footer, pre, figure, table, h1, h2, h3, h4, p")
-    ?? element;
+  // Keep the target at the exact clicked/selected element. Explicit anchors on
+  // ancestors remain useful for section navigation, but must not make every
+  // nested annotation point at the same top-level review block.
+  return element;
 }
 
 function targetFromElement(element: Element, quote = ""): Promise<SelectedTarget> {
@@ -207,6 +208,16 @@ function markTarget(element: Element | null): void {
   if (!documentRef) return;
   for (const marked of [...documentRef.querySelectorAll("[data-pair-plan-target]")]) marked.removeAttribute("data-pair-plan-target");
   element?.setAttribute("data-pair-plan-target", "true");
+}
+
+function markHoveredTarget(element: Element | null): void {
+  if (hoveredArtifactElement && hoveredArtifactElement !== element) {
+    hoveredArtifactElement.removeAttribute("data-pair-plan-hover");
+  }
+  hoveredArtifactElement = element;
+  if (element && element !== selectedTarget?.element) {
+    element.setAttribute("data-pair-plan-hover", "true");
+  }
 }
 
 function showSelectedTarget(target: SelectedTarget | null): void {
@@ -246,11 +257,26 @@ function installArtifactHooks(): void {
   artifactLoading.classList.add("is-hidden");
   renderArtifactSections(documentRef);
   const style = documentRef.createElement("style");
-  style.textContent = `[data-pair-plan-target]{outline:2px solid #1eb9b0 !important;outline-offset:3px !important;}`;
+  style.textContent = `[data-pair-plan-hover]{outline:2px solid #f4c95d !important;outline-offset:3px !important;}[data-pair-plan-target]{outline:2px solid #1eb9b0 !important;outline-offset:3px !important;}`;
   documentRef.head.appendChild(style);
+
+  documentRef.addEventListener("mouseover", (event) => {
+    if (mode !== "annotate") return;
+    markHoveredTarget(targetElementFromNode(event.target, documentRef));
+  }, true);
+
+  documentRef.addEventListener("mouseout", (event) => {
+    const relatedTarget = targetElementFromNode(event.relatedTarget, documentRef);
+    if (relatedTarget === hoveredArtifactElement) return;
+    markHoveredTarget(null);
+  }, true);
 
   documentRef.addEventListener("click", (event) => {
     if (mode !== "annotate") return;
+    if (ignoreNextArtifactClick) {
+      ignoreNextArtifactClick = false;
+      return;
+    }
     const element = targetElementFromNode(event.target, documentRef);
     if (!element) return;
     event.preventDefault();
@@ -262,11 +288,13 @@ function installArtifactHooks(): void {
     if (mode !== "annotate") return;
     const selection = documentRef.getSelection();
     if (!selection || selection.isCollapsed || !selection.toString().trim()) return;
-    const element = targetElementFromNode(selection.anchorNode, documentRef);
+    const range = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+    const element = targetElementFromNode(range?.commonAncestorContainer ?? selection.anchorNode, documentRef);
     if (!element) return;
+    ignoreNextArtifactClick = true;
     void targetFromElement(element, selection.toString().trim()).then((target) => {
-      target.startOffset = selection.anchorOffset;
-      target.endOffset = selection.focusOffset;
+      target.startOffset = range?.startOffset ?? selection.anchorOffset;
+      target.endOffset = range?.endOffset ?? selection.focusOffset;
       showSelectedTarget(target);
     });
   });
@@ -406,6 +434,7 @@ async function boot(): Promise<void> {
   $$<HTMLButtonElement>("[data-view]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view as "queue" | "history")));
   $$<HTMLButtonElement>("[data-mode]").forEach((button) => button.addEventListener("click", () => {
     mode = button.dataset.mode as "annotate" | "explore";
+    if (mode === "explore") markHoveredTarget(null);
     $$<HTMLButtonElement>("[data-mode]").forEach((candidate) => candidate.classList.toggle("is-active", candidate === button));
     showToast(mode === "annotate" ? "Annotate mode: select a block or text range." : "Explore mode: artifact controls stay live.");
   }));

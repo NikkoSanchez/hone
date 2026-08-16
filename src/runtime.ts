@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { resolveArtifactPath, sessionIdForPath } from "./path-safety";
 import type { SessionEndBy, SessionSnapshot } from "./types";
@@ -11,6 +11,17 @@ export interface RuntimeRecord {
   port: number;
   stateDir: string;
   startedAt: string;
+}
+
+export interface RecentArtifactRecord {
+  artifactPath: string;
+  rootPath: string;
+  sessionId: string;
+  createdAt: string;
+  updatedAt: string;
+  lastTouchedAt: string;
+  sessionUpdatedAt: string;
+  endedAt?: string;
 }
 
 export interface SessionPayload extends SessionSnapshot {
@@ -37,6 +48,14 @@ export interface EnsureServerOptions {
 interface RuntimeRegistry {
   version: 1;
   runtimes: RuntimeRecord[];
+}
+
+interface PersistedArtifactSession {
+  id: string;
+  filePath: string;
+  rootPath: string;
+  updatedAt: string;
+  endedAt?: string;
 }
 
 export interface SessionHandle {
@@ -78,6 +97,16 @@ function isRuntimeRecord(value: unknown): value is RuntimeRecord {
     && typeof record.port === "number"
     && typeof record.stateDir === "string"
     && typeof record.startedAt === "string";
+}
+
+function isPersistedArtifactSession(value: unknown): value is PersistedArtifactSession {
+  if (!value || typeof value !== "object") return false;
+  const state = value as Record<string, unknown>;
+  return typeof state.id === "string"
+    && typeof state.filePath === "string"
+    && typeof state.rootPath === "string"
+    && typeof state.updatedAt === "string"
+    && (state.endedAt === undefined || typeof state.endedAt === "string");
 }
 
 async function fetchSession(record: RuntimeRecord): Promise<SessionPayload | null> {
@@ -231,6 +260,38 @@ export async function listRuntimes(stateDir: string): Promise<Array<RuntimeRecor
     await writeRegistry(stateDir, registry);
   }
   return results;
+}
+
+export async function listRecentArtifacts(stateDir: string, limit = 20): Promise<RecentArtifactRecord[]> {
+  const entries = await readdir(stateDir, { withFileTypes: true }).catch(() => []);
+  const records = await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json") && entry.name !== "runtime.json")
+    .map(async (entry): Promise<RecentArtifactRecord | null> => {
+      const statePath = join(stateDir, entry.name);
+      const persisted = await Bun.file(statePath).json().catch(() => null);
+      if (!isPersistedArtifactSession(persisted)) return null;
+
+      const artifactStat = await stat(persisted.filePath).catch(() => null);
+      if (!artifactStat?.isFile()) return null;
+      const createdAt = artifactStat.birthtime.toISOString();
+      const updatedAt = artifactStat.mtime.toISOString();
+      const lastTouchedAt = new Date(Math.max(artifactStat.birthtimeMs, artifactStat.mtimeMs)).toISOString();
+      return {
+        artifactPath: persisted.filePath,
+        rootPath: persisted.rootPath,
+        sessionId: persisted.id,
+        createdAt,
+        updatedAt,
+        lastTouchedAt,
+        sessionUpdatedAt: persisted.updatedAt,
+        ...(persisted.endedAt ? { endedAt: persisted.endedAt } : {}),
+      };
+    }));
+
+  return records
+    .filter((record): record is RecentArtifactRecord => record !== null)
+    .sort((left, right) => right.lastTouchedAt.localeCompare(left.lastTouchedAt))
+    .slice(0, Math.max(0, Math.floor(limit)));
 }
 
 export async function endSession(handle: SessionHandle, by: SessionEndBy = "agent"): Promise<void> {

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
@@ -18,7 +18,34 @@ test("prints the agent-facing CLI contract", async () => {
   expect(result.stdout).toContain("pair-plan poll <artifact>");
   expect(result.stdout).toContain("pair-plan complete <artifact>");
   expect(result.stdout).toContain("pair-plan stop <artifact>");
+  expect(result.stdout).toContain("pair-plan recent [--limit 20]");
   expect(result.stderr).toBe("");
+});
+
+test("recent lists known artifacts as date-and-path lines", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pair-plan-recent-test-"));
+  const artifactPath = join(directory, "recent-plan.html");
+  const stateDir = join(directory, "state");
+
+  try {
+    await writeFile(artifactPath, "<main>Recent plan</main>", "utf8");
+    await mkdir(stateDir);
+    await writeFile(join(stateDir, "recent-session.json"), JSON.stringify({
+      id: "recent-session",
+      filePath: artifactPath,
+      rootPath: directory,
+      updatedAt: "2026-08-08T12:00:00.000Z",
+      endedAt: "2026-08-08T12:05:00.000Z",
+    }), "utf8");
+
+    const result = await runCli("recent", "--state-dir", stateDir, "--limit", "1");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toMatch(/^\d{4}-\d{2}-\d{2}  .+recent-plan\.html$/);
+    expect(result.stdout.trim()).toContain(artifactPath);
+    expect(result.stderr).toBe("");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("open and complete point the agent back into the poll loop", async () => {

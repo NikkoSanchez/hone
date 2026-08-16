@@ -4,10 +4,10 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { PairPlanAgentClient } from "./agent-client";
 import { defaultStateDir } from "./server";
-import { endSession, ensureServer, listRuntimes, resolveCliArtifact, stopServer, type SessionHandle } from "./runtime";
+import { ensureServer, listRecentArtifacts, listRuntimes, resolveCliArtifact, stopServer, type SessionHandle } from "./runtime";
 import { isFeedbackEnded, type AgentReply } from "./types";
 
-const COMMANDS = new Set(["open", "poll", "complete", "status", "end", "server", "stop", "reopen", "help"]);
+const COMMANDS = new Set(["open", "poll", "complete", "status", "recent", "end", "server", "stop", "reopen", "help"]);
 const VALUE_FLAGS = new Set([
   "--artifact",
   "--root",
@@ -21,6 +21,7 @@ const VALUE_FLAGS = new Set([
   "--changed",
   "--body",
   "--by",
+  "--limit",
 ]);
 
 const HELP = `Pair Plan · local agent review loop
@@ -30,6 +31,7 @@ Usage:
   pair-plan poll <artifact> [--timeout-ms 30000] [--reopen]
   pair-plan complete <artifact> --batch-id ID --summary TEXT [--revision N] [--changed ANCHOR]
   pair-plan status [artifact]
+  pair-plan recent [--limit 20]
   pair-plan end <artifact>
   pair-plan server <artifact>
   pair-plan stop <artifact>
@@ -39,6 +41,7 @@ Commands:
   poll       Wait for one feedback batch and print compact JSON to stdout.
   complete   Atomically acknowledge a batch and post the agent reply.
   status     Show healthy local runtimes, or one artifact's state.
+  recent     List known artifacts as date-and-path lines, newest first.
   end        End a session without deleting its artifact or history.
   server     Run one server in the foreground for diagnostics.
   stop       Stop the daemon for one artifact and remove its runtime record.
@@ -49,6 +52,7 @@ Common options:
   --root PATH               Artifact asset root
   --port PORT               Local server port (default: 8765)
   --idle-timeout-ms MS      Daemon idle timeout (default: 1800000; 0 disables)
+  --limit N                 Maximum artifacts returned by recent (default: 20)
   --no-open                 Do not open the review URL in the system browser
   --reopen                  Reopen a session previously ended by a user or agent
   --help                    Show this help
@@ -278,6 +282,17 @@ async function runStatus(args: string[]): Promise<void> {
   output({ status: "ok", state_dir: stateDir, runtimes: await listRuntimes(stateDir) });
 }
 
+async function runRecent(args: string[]): Promise<void> {
+  const stateDir = stateDirectory(args);
+  const limit = Math.max(0, Math.floor(numberOption(args, "--limit", 20)));
+  const artifacts = await listRecentArtifacts(stateDir, limit);
+  process.stdout.write(artifacts.map((artifact) => {
+    const date = artifact.lastTouchedAt.slice(0, 10);
+    return `${date}  ${artifact.artifactPath}`;
+  }).join("\n"));
+  if (artifacts.length > 0) process.stdout.write("\n");
+}
+
 async function runEnd(args: string[]): Promise<void> {
   const current = await context(args);
   if (!current) return;
@@ -327,6 +342,7 @@ async function main(): Promise<void> {
   if (parsed.command === "poll") return runPoll(parsed.args);
   if (parsed.command === "complete") return runComplete(parsed.args);
   if (parsed.command === "status") return runStatus(parsed.args);
+  if (parsed.command === "recent") return runRecent(parsed.args);
   if (parsed.command === "end") return runEnd(parsed.args);
   if (parsed.command === "reopen") return runReopen(parsed.args);
   if (parsed.command === "stop") return runStop(parsed.args);

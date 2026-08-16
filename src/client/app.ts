@@ -1,4 +1,34 @@
+import { FileDiff, parsePatchFiles } from "@pierre/diffs";
+
 type AgentStatus = "listening" | "working" | "offline";
+
+interface CodeReviewFinding {
+  id: string;
+  file: string;
+  line?: number;
+  side?: "deletions" | "additions";
+  severity: "info" | "warning" | "error";
+  title: string;
+  body: string;
+}
+
+interface CodeReview {
+  patch: string;
+  findings: CodeReviewFinding[];
+  summary?: string;
+  source?: string;
+  createdAt: string;
+}
+
+interface ArtifactOption {
+  id: string;
+  name: string;
+  filePath: string;
+  url: string;
+  active: boolean;
+  revision: number;
+  hasReview: boolean;
+}
 
 interface TargetRef {
   anchor: string;
@@ -38,6 +68,8 @@ interface SessionSnapshot {
   eventsUrl: string;
   feedbackUrl: string;
   statusUrl: string;
+  reviewUrl: string;
+  review?: CodeReview;
 }
 
 interface SelectedTarget extends TargetRef {
@@ -55,14 +87,36 @@ const historyList = $("#historyList") as HTMLDivElement;
 const sectionList = $("#sectionList") as HTMLElement;
 const quotePreview = $("#quotePreview") as HTMLDivElement;
 const toast = $("#toast") as HTMLDivElement;
+const artifactSelect = $("#artifactSelect") as HTMLSelectElement;
+const reviewStage = $("#reviewStage") as HTMLDivElement;
+const diffList = $("#diffList") as HTMLDivElement;
+const reviewList = $("#reviewList") as HTMLDivElement;
 
 let session: SessionSnapshot;
 let localQueue: FeedbackItem[] = [];
+let diffInstances: FileDiff[] = [];
 let selectedTarget: SelectedTarget | null = null;
 let mode: "annotate" | "explore" = "annotate";
 let toastTimer: number | undefined;
 let ignoreNextArtifactClick = false;
 let hoveredArtifactElement: Element | null = null;
+
+function draftStorageKey(): string {
+  return `hone:drafts:${session.id}`;
+}
+
+function saveDrafts(): void {
+  localStorage.setItem(draftStorageKey(), JSON.stringify(localQueue));
+}
+
+function loadDrafts(): void {
+  try {
+    const value = JSON.parse(localStorage.getItem(draftStorageKey()) ?? "[]") as unknown;
+    localQueue = Array.isArray(value) ? value as FeedbackItem[] : [];
+  } catch {
+    localQueue = [];
+  }
+}
 
 function escapeHtml(value: unknown): string {
   return String(value).replace(/[&<>"']/g, (character) => ({
@@ -139,8 +193,83 @@ function renderQueue(): void {
 function renderHistory(): void {
   const messages = session?.history ?? [];
   historyList.innerHTML = messages.length
-    ? messages.map((message) => `<article class="history-card ${escapeHtml(message.role)}"><div class="message-meta"><strong>${escapeHtml(message.role === "agent" ? "Agent" : message.role === "user" ? "You" : "Pair Plan")}</strong><span>${escapeHtml(formatTime(message.createdAt))}</span></div><p class="message-body">${escapeHtml(message.body)}</p></article>`).join("")
+    ? messages.map((message) => `<article class="history-card ${escapeHtml(message.role)}"><div class="message-meta"><strong>${escapeHtml(message.role === "agent" ? "Agent" : message.role === "user" ? "You" : "Hone")}</strong><span>${escapeHtml(formatTime(message.createdAt))}</span></div><p class="message-body">${escapeHtml(message.body)}</p></article>`).join("")
     : `<div class="empty-state">No delivered messages yet.</div>`;
+}
+
+function findingAnchor(finding: CodeReviewFinding): string {
+  return `code:${finding.file}:${finding.side ?? "additions"}:${finding.line ?? 1}`;
+}
+
+function renderReviewFindings(): void {
+  const findings = session.review?.findings ?? [];
+  $("#reviewCount")!.textContent = String(findings.length);
+  reviewList.innerHTML = findings.length
+    ? findings.map((finding, index) => `
+      <article class="finding-card ${escapeHtml(finding.severity)}">
+        <span class="finding-location mono">${escapeHtml(finding.file)}${finding.line ? `:${finding.line}` : ""}</span>
+        <strong>${escapeHtml(finding.title)}</strong>
+        <p>${escapeHtml(finding.body)}</p>
+        <div class="finding-actions"><button type="button" data-finding-action="locate" data-index="${index}">Show diff</button><button type="button" data-finding-action="queue" data-index="${index}">Discuss</button></div>
+      </article>`).join("")
+    : `<div class="empty-state">The review contains no structured findings.</div>`;
+}
+
+function renderCodeReview(): void {
+  for (const instance of diffInstances) instance.cleanUp();
+  diffInstances = [];
+  diffList.replaceChildren();
+  const review = session.review;
+  if (!review) return;
+  $("#reviewSummary")!.textContent = review.summary ?? "";
+  const files = parsePatchFiles(review.patch, `hone-${session.id}`)
+    .flatMap((patch) => patch.files);
+  if (files.length === 0) {
+    diffList.innerHTML = `<div class="diff-empty">No file diffs could be parsed from this patch.</div>`;
+    return;
+  }
+  for (const file of files) {
+    const container = document.createElement("div");
+    container.className = "diff-file";
+    container.dataset.file = file.name;
+    diffList.appendChild(container);
+    const instance = new FileDiff({
+      diffStyle: "unified",
+      overflow: "wrap",
+      lineDiffType: "word",
+      hunkSeparators: "line-info",
+      lineHoverHighlight: "both",
+      onLineClick: ({ lineNumber, annotationSide, lineElement }) => {
+        showSelectedTarget({
+          element: lineElement,
+          anchor: `code:${file.name}:${annotationSide}:${lineNumber}`,
+          label: `${file.name}:${lineNumber}`,
+        });
+        setView("queue");
+      },
+    });
+    instance.render({ fileDiff: file, fileContainer: container });
+    diffInstances.push(instance);
+  }
+}
+
+function setSurface(surface: "artifact" | "review"): void {
+  if (surface === "review" && !session.review) return;
+  $(".artifact-stage")!.toggleAttribute("hidden", surface !== "artifact");
+  reviewStage.toggleAttribute("hidden", surface !== "review");
+  $$<HTMLButtonElement>("[data-surface]").forEach((button) => button.classList.toggle("is-active", button.dataset.surface === surface));
+  $$<HTMLButtonElement>("[data-mode]").forEach((button) => button.toggleAttribute("hidden", surface === "review"));
+  if (surface === "review") renderCodeReview();
+}
+
+function reviewMarkdown(): string {
+  const review = session.review;
+  if (!review) return "";
+  const sections = review.findings.map((finding) => {
+    const location = `${finding.file}${finding.line ? `:${finding.line}` : ""}`;
+    return `### [${finding.severity.toUpperCase()}] ${finding.title}\n\n${finding.body}\n\n\`${location}\``;
+  });
+  return [`## Agent code review`, review.summary ?? "", ...sections].filter(Boolean).join("\n\n");
 }
 
 function render(): void {
@@ -150,6 +279,10 @@ function render(): void {
   setStatusVisual(session.agentStatus);
   renderQueue();
   renderHistory();
+  const hasReview = Boolean(session.review);
+  $("#reviewSurfaceButton")!.toggleAttribute("hidden", !hasReview);
+  $("#reviewTab")!.toggleAttribute("hidden", !hasReview);
+  renderReviewFindings();
 }
 
 async function sha256(value: string): Promise<string> {
@@ -206,17 +339,17 @@ function targetFromElement(element: Element, quote = ""): Promise<SelectedTarget
 function markTarget(element: Element | null): void {
   const documentRef = frame.contentDocument;
   if (!documentRef) return;
-  for (const marked of [...documentRef.querySelectorAll("[data-pair-plan-target]")]) marked.removeAttribute("data-pair-plan-target");
-  element?.setAttribute("data-pair-plan-target", "true");
+  for (const marked of [...documentRef.querySelectorAll("[data-hone-target]")]) marked.removeAttribute("data-hone-target");
+  element?.setAttribute("data-hone-target", "true");
 }
 
 function markHoveredTarget(element: Element | null): void {
   if (hoveredArtifactElement && hoveredArtifactElement !== element) {
-    hoveredArtifactElement.removeAttribute("data-pair-plan-hover");
+    hoveredArtifactElement.removeAttribute("data-hone-hover");
   }
   hoveredArtifactElement = element;
   if (element && element !== selectedTarget?.element) {
-    element.setAttribute("data-pair-plan-hover", "true");
+    element.setAttribute("data-hone-hover", "true");
   }
 }
 
@@ -257,7 +390,7 @@ function installArtifactHooks(): void {
   artifactLoading.classList.add("is-hidden");
   renderArtifactSections(documentRef);
   const style = documentRef.createElement("style");
-  style.textContent = `[data-pair-plan-hover]{outline:2px solid #f4c95d !important;outline-offset:3px !important;}[data-pair-plan-target]{outline:2px solid #1eb9b0 !important;outline-offset:3px !important;}`;
+  style.textContent = `[data-hone-hover]{outline:2px solid #f4c95d !important;outline-offset:3px !important;}[data-hone-target]{outline:2px solid #1eb9b0 !important;outline-offset:3px !important;}`;
   documentRef.head.appendChild(style);
 
   documentRef.addEventListener("mouseover", (event) => {
@@ -323,6 +456,7 @@ function selectLocalQueueItem(index: number): void {
   showSelectedTarget({ ...item.target, element: frame.contentDocument?.body ?? frame });
   feedbackBody.value = item.body;
   localQueue.splice(index, 1);
+  saveDrafts();
   renderQueue();
   feedbackBody.focus();
 }
@@ -344,6 +478,7 @@ async function queueComment(): Promise<void> {
     queueKey: `draft-${Date.now()}-${localQueue.length}`,
     tag: selectedTarget.quote ? "precise target" : "comment",
   });
+  saveDrafts();
   feedbackBody.value = "";
   renderQueue();
   showToast("Comment queued locally. Send when the batch is ready.");
@@ -358,6 +493,7 @@ async function sendQueue(endSession = false): Promise<void> {
   });
   if (!response.ok) return showToast(`Could not send feedback (${response.status}).`);
   localQueue = [];
+  saveDrafts();
   renderQueue();
   showToast("Feedback sent. The agent can receive the batch on its next poll.");
   if (endSession) {
@@ -369,6 +505,7 @@ function moveLocalItem(index: number, direction: -1 | 1): void {
   const targetIndex = index + direction;
   if (targetIndex < 0 || targetIndex >= localQueue.length) return;
   [localQueue[index], localQueue[targetIndex]] = [localQueue[targetIndex], localQueue[index]];
+  saveDrafts();
   renderQueue();
 }
 
@@ -383,13 +520,15 @@ function handleQueueAction(event: Event): void {
   if (action === "edit") selectLocalQueueItem(index);
   if (action === "remove") {
     localQueue.splice(index, 1);
+    saveDrafts();
     renderQueue();
   }
 }
 
-function setView(view: "queue" | "history"): void {
+function setView(view: "queue" | "history" | "review"): void {
   $("#queueView")!.toggleAttribute("hidden", view !== "queue");
   $("#historyView")!.toggleAttribute("hidden", view !== "history");
+  $("#reviewView")!.toggleAttribute("hidden", view !== "review");
   $$<HTMLButtonElement>("[data-view]").forEach((button) => button.classList.toggle("is-active", button.dataset.view === view));
 }
 
@@ -400,13 +539,54 @@ function updateFromEvent(event: { type: string; snapshot: SessionSnapshot }): vo
     artifactLoading.classList.remove("is-hidden");
     frame.src = `${session.artifactUrl}?revision=${session.artifactRevision}`;
   }
+  if (event.type === "review") {
+    renderCodeReview();
+    setSurface("review");
+    setView("review");
+  }
+}
+
+async function loadArtifacts(): Promise<void> {
+  const response = await fetch("/api/artifacts");
+  if (!response.ok) return;
+  const payload = await response.json() as { artifacts: ArtifactOption[] };
+  const artifacts = payload.artifacts.length
+    ? payload.artifacts
+    : [{ id: session.id, name: session.filePath.split("/").pop() ?? session.filePath, filePath: session.filePath, url: location.origin, active: true, revision: session.artifactRevision, hasReview: Boolean(session.review) }];
+  artifactSelect.innerHTML = artifacts.map((artifact) => `<option value="${escapeHtml(artifact.url)}" ${artifact.active ? "selected" : ""}>${escapeHtml(artifact.name)}${artifact.hasReview ? " · review" : ""}</option>`).join("");
+  artifactSelect.title = session.filePath;
+}
+
+function queueFinding(index: number): void {
+  const finding = session.review?.findings[index];
+  if (!finding) return;
+  localQueue.push({
+    target: { anchor: findingAnchor(finding), label: `${finding.file}${finding.line ? `:${finding.line}` : ""}` },
+    body: `Review finding: ${finding.title}\n\n${finding.body}`,
+    queueKey: `review-${finding.id}`,
+    tag: "code review",
+  });
+  saveDrafts();
+  renderQueue();
+  setView("queue");
+  showToast("Finding added to the local discussion queue.");
+}
+
+function locateFinding(index: number): void {
+  const finding = session.review?.findings[index];
+  if (!finding) return;
+  setSurface("review");
+  const file = [...diffList.querySelectorAll<HTMLElement>(".diff-file")].find((element) => element.dataset.file === finding.file);
+  file?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function boot(): Promise<void> {
   const response = await fetch("/api/session");
   if (!response.ok) throw new Error(`Session bootstrap failed: ${response.status}`);
   session = await response.json() as SessionSnapshot;
+  loadDrafts();
   render();
+  await loadArtifacts();
 
   frame.addEventListener("load", installArtifactHooks);
   frame.src = `${session.artifactUrl}?revision=${session.artifactRevision}`;
@@ -431,7 +611,24 @@ async function boot(): Promise<void> {
     frame.src = `${session.artifactUrl}?revision=${session.artifactRevision}&reload=${Date.now()}`;
   });
 
-  $$<HTMLButtonElement>("[data-view]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view as "queue" | "history")));
+  artifactSelect.addEventListener("change", () => {
+    saveDrafts();
+    if (artifactSelect.value && artifactSelect.value !== location.origin) location.href = artifactSelect.value;
+  });
+
+  $$<HTMLButtonElement>("[data-surface]").forEach((button) => button.addEventListener("click", () => setSurface(button.dataset.surface as "artifact" | "review")));
+
+  $$<HTMLButtonElement>("[data-view]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view as "queue" | "history" | "review")));
+  reviewList.addEventListener("click", (event) => {
+    const button = (event.target as Element).closest<HTMLButtonElement>("button[data-finding-action]");
+    if (!button) return;
+    const index = Number(button.dataset.index);
+    if (button.dataset.findingAction === "queue") queueFinding(index);
+    if (button.dataset.findingAction === "locate") locateFinding(index);
+  });
+  $("#copyReview")!.addEventListener("click", () => {
+    void navigator.clipboard.writeText(reviewMarkdown()).then(() => showToast("GitHub-ready review copied. Nothing was posted."), () => showToast("Could not access the clipboard."));
+  });
   $$<HTMLButtonElement>("[data-mode]").forEach((button) => button.addEventListener("click", () => {
     mode = button.dataset.mode as "annotate" | "explore";
     if (mode === "explore") markHoveredTarget(null);
@@ -458,10 +655,15 @@ async function boot(): Promise<void> {
       void sendQueue();
     }
   });
+
+  if (new URLSearchParams(location.search).get("view") === "review" && session.review) {
+    setSurface("review");
+    setView("review");
+  }
 }
 
 boot().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : "Pair Plan could not start.";
+  const message = error instanceof Error ? error.message : "Hone could not start.";
   artifactLoading.classList.remove("is-hidden");
   artifactLoading.textContent = message;
   showToast(message);

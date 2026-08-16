@@ -1,4 +1,4 @@
-import { isFeedbackEnded, type AgentReply, type FeedbackEnvelope, type FeedbackPollResult, type SessionEndBy } from "./types";
+import { isFeedbackEnded, type AgentReply, type CodeReviewInput, type FeedbackEnvelope, type FeedbackPollResult, type SessionEndBy } from "./types";
 
 export interface AgentLoopOptions {
   signal?: AbortSignal;
@@ -7,7 +7,7 @@ export interface AgentLoopOptions {
 
 export type FeedbackHandler = (envelope: FeedbackEnvelope) => Promise<AgentReply>;
 
-export class PairPlanAgentClient {
+export class HoneAgentClient {
   readonly baseUrl: string;
   readonly sessionId: string;
 
@@ -38,6 +38,10 @@ export class PairPlanAgentClient {
     await this.post("complete", { batchId, ...reply });
   }
 
+  async review(review: CodeReviewInput): Promise<void> {
+    await this.post("review", review);
+  }
+
   async status(status: "listening" | "working" | "offline"): Promise<void> {
     await this.post("status", { status });
   }
@@ -63,6 +67,6 @@ export class PairPlanAgentClient {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!response.ok) throw new Error(`Pair Plan request failed: ${response.status} ${await response.text()}`);
+    if (!response.ok) throw new Error(`Hone request failed: ${response.status} ${await response.text()}`);
   }
 }

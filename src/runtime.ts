@@ -34,6 +34,7 @@ export interface SessionPayload extends SessionSnapshot {
   completeUrl: string;
   statusUrl: string;
   endUrl: string;
+  reviewUrl: string;
 }
 
 export interface EnsureServerOptions {
@@ -127,7 +128,7 @@ async function waitForSession(record: RuntimeRecord, timeoutMs = 6_000): Promise
     if (session) return session;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`Pair Plan server did not become ready on port ${record.port}.`);
+  throw new Error(`Hone server did not become ready on port ${record.port}.`);
 }
 
 function serverScriptPath(): string {
@@ -181,7 +182,7 @@ export async function ensureServer(options: EnsureServerOptions): Promise<Sessio
       if (session.endedAt && options.reopen) {
         await postJson(`${baseUrl(existing)}/api/session/${existing.sessionId}/reopen`, {});
         const reopened = await fetchSession(existing);
-        if (!reopened) throw new Error("Pair Plan session did not reopen cleanly.");
+        if (!reopened) throw new Error("Hone session did not reopen cleanly.");
         return { record: existing, baseUrl: baseUrl(existing), session: reopened };
       }
       return { record: existing, baseUrl: baseUrl(existing), session };
@@ -200,7 +201,7 @@ export async function ensureServer(options: EnsureServerOptions): Promise<Sessio
   if (session.endedAt && options.reopen) {
     await postJson(`${baseUrl(record)}/api/session/${record.sessionId}/reopen`, {});
     const reopened = await fetchSession(record);
-    if (!reopened) throw new Error("Pair Plan session did not reopen cleanly.");
+    if (!reopened) throw new Error("Hone session did not reopen cleanly.");
     return { record, baseUrl: baseUrl(record), session: reopened };
   }
   return { record, baseUrl: baseUrl(record), session };
@@ -217,7 +218,7 @@ async function postJson(url: string, body: unknown): Promise<Record<string, unkn
     body: JSON.stringify(body),
   });
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
-  if (!response.ok) throw new Error(typeof payload.error === "string" ? payload.error : `Pair Plan request failed: ${response.status}`);
+  if (!response.ok) throw new Error(typeof payload.error === "string" ? payload.error : `Hone request failed: ${response.status}`);
   return payload;
 }
 
@@ -301,7 +302,7 @@ export async function endSession(handle: SessionHandle, by: SessionEndBy = "agen
 export async function reopenSession(handle: SessionHandle): Promise<SessionPayload> {
   await postJson(`${handle.baseUrl}/api/session/${handle.session.id}/reopen`, {});
   const session = await fetchSession(handle.record);
-  if (!session) throw new Error("Pair Plan session did not reopen cleanly.");
+  if (!session) throw new Error("Hone session did not reopen cleanly.");
   return session;
 }
 

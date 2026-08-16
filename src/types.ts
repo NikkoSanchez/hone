@@ -2,7 +2,34 @@ export type AgentStatus = "listening" | "working" | "offline";
 
 export type SessionEndBy = "agent" | "user";
 
-export type SessionEventType = "snapshot" | "queue" | "artifact" | "presence" | "message";
+export type SessionEventType = "snapshot" | "queue" | "artifact" | "presence" | "message" | "review";
+
+export type ReviewSeverity = "info" | "warning" | "error";
+
+export interface CodeReviewFinding {
+  id: string;
+  file: string;
+  line?: number;
+  side?: "deletions" | "additions";
+  severity: ReviewSeverity;
+  title: string;
+  body: string;
+}
+
+export interface CodeReview {
+  patch: string;
+  findings: CodeReviewFinding[];
+  summary?: string;
+  source?: string;
+  createdAt: string;
+}
+
+export interface CodeReviewInput {
+  patch: string;
+  findings?: Array<Partial<CodeReviewFinding> & Pick<CodeReviewFinding, "file" | "title" | "body">>;
+  summary?: string;
+  source?: string;
+}
 
 export interface TargetRef {
   anchor: string;
@@ -75,6 +102,7 @@ export interface SessionSnapshot {
   agentStatus: AgentStatus;
   updatedAt: string;
   deliveryBatchId: string | null;
+  review?: CodeReview;
   endedAt?: string;
   endedBy?: SessionEndBy;
 }
@@ -104,4 +132,5 @@ export interface StoredSessionState {
   updatedAt: string;
   endedAt?: string;
   endedBy?: SessionEndBy;
+  review?: CodeReview;
 }

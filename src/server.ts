@@ -1,9 +1,10 @@
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { SessionStore } from "./session-store";
-import type { AgentReply, AgentStatus, FeedbackInput, FeedbackPollResult, SessionEndBy } from "./types";
+import type { AgentReply, AgentStatus, CodeReviewFinding, CodeReviewInput, FeedbackInput, FeedbackPollResult, SessionEndBy } from "./types";
+import { listRuntimes } from "./runtime";
 import {
   contentTypeFor,
   isLocalRequest,
@@ -15,7 +16,7 @@ import {
 export const DEFAULT_PORT = 8765;
 export const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1_000;
 
-export interface PairPlanServerConfig {
+export interface HoneServerConfig {
   artifactInput: string;
   configuredRoot?: string;
   stateDir: string;
@@ -24,7 +25,7 @@ export interface PairPlanServerConfig {
   installSignalHandlers?: boolean;
 }
 
-export interface PairPlanServerRuntime {
+export interface HoneServerRuntime {
   readonly artifact: Awaited<ReturnType<typeof resolveArtifactPath>>;
   readonly store: SessionStore;
   readonly server: ReturnType<typeof Bun.serve>;
@@ -33,7 +34,7 @@ export interface PairPlanServerRuntime {
 }
 
 export function defaultStateDir(): string {
-  return join(homedir(), ".pair-plan", "sessions");
+  return join(homedir(), ".hone", "sessions");
 }
 
 function argumentValue(args: string[], name: string): string | undefined {
@@ -54,18 +55,18 @@ function parseIdleTimeout(value: string | undefined): number {
   return Math.max(0, parseNumber(value, DEFAULT_IDLE_TIMEOUT_MS));
 }
 
-export function parseServerConfig(args: string[] = Bun.argv.slice(2)): PairPlanServerConfig {
+export function parseServerConfig(args: string[] = Bun.argv.slice(2)): HoneServerConfig {
   const argv = args.filter((argument) => argument !== "--");
   const artifactInput = argumentValue(argv, "--artifact")
     ?? argv.find((argument) => !argument.startsWith("-"))
-    ?? Bun.env.PAIR_PLAN_ARTIFACT;
+    ?? Bun.env.HONE_ARTIFACT;
   if (!artifactInput) {
-    throw new Error("An artifact path is required. Pass one as an argument or set PAIR_PLAN_ARTIFACT.");
+    throw new Error("An artifact path is required. Pass one as an argument or set HONE_ARTIFACT.");
   }
-  const configuredRoot = argumentValue(argv, "--root") ?? Bun.env.PAIR_PLAN_ARTIFACT_ROOT;
-  const stateDir = resolve(argumentValue(argv, "--state-dir") ?? Bun.env.PAIR_PLAN_STATE_DIR ?? defaultStateDir());
-  const port = Math.max(1, Math.min(65_535, Math.floor(parseNumber(argumentValue(argv, "--port") ?? Bun.env.PAIR_PLAN_PORT, DEFAULT_PORT))));
-  const idleTimeoutMs = parseIdleTimeout(argumentValue(argv, "--idle-timeout-ms") ?? Bun.env.PAIR_PLAN_IDLE_TIMEOUT_MS);
+  const configuredRoot = argumentValue(argv, "--root") ?? Bun.env.HONE_ARTIFACT_ROOT;
+  const stateDir = resolve(argumentValue(argv, "--state-dir") ?? Bun.env.HONE_STATE_DIR ?? defaultStateDir());
+  const port = Math.max(1, Math.min(65_535, Math.floor(parseNumber(argumentValue(argv, "--port") ?? Bun.env.HONE_PORT, DEFAULT_PORT))));
+  const idleTimeoutMs = parseIdleTimeout(argumentValue(argv, "--idle-timeout-ms") ?? Bun.env.HONE_IDLE_TIMEOUT_MS);
   return { artifactInput, configuredRoot, stateDir, port, idleTimeoutMs };
 }
 
@@ -155,6 +156,34 @@ function normalizeReply(payload: Record<string, unknown>): AgentReply {
   };
 }
 
+function normalizeReview(payload: Record<string, unknown>): CodeReviewInput {
+  const patch = stringValue(payload.patch, "patch", 5_000_000);
+  const rawFindings = payload.findings === undefined ? [] : payload.findings;
+  if (!Array.isArray(rawFindings)) throw new Error("findings must be an array");
+  if (rawFindings.length > 500) throw new Error("A review cannot contain more than 500 findings");
+  const findings = rawFindings.map((value, index) => {
+    if (!value || typeof value !== "object") throw new Error(`findings[${index}] must be an object`);
+    const finding = value as Record<string, unknown>;
+    const severity: CodeReviewFinding["severity"] = finding.severity === "error" || finding.severity === "warning" ? finding.severity : "info";
+    const side: CodeReviewFinding["side"] = finding.side === "deletions" || finding.side === "additions" ? finding.side : undefined;
+    return {
+      ...(typeof finding.id === "string" ? { id: finding.id.slice(0, 200) } : {}),
+      file: stringValue(finding.file, `findings[${index}].file`, 1_000),
+      ...(typeof finding.line === "number" ? { line: Math.max(1, Math.floor(finding.line)) } : {}),
+      ...(side ? { side } : {}),
+      severity,
+      title: stringValue(finding.title, `findings[${index}].title`, 500),
+      body: stringValue(finding.body, `findings[${index}].body`, 8_000),
+    };
+  });
+  return {
+    patch,
+    findings,
+    ...(typeof payload.summary === "string" && payload.summary.trim() ? { summary: payload.summary.trim().slice(0, 4_000) } : {}),
+    ...(typeof payload.source === "string" && payload.source.trim() ? { source: payload.source.trim().slice(0, 200) } : {}),
+  };
+}
+
 function sessionPayload(store: SessionStore) {
   return {
     ...store.getSnapshot(),
@@ -167,10 +196,11 @@ function sessionPayload(store: SessionStore) {
     completeUrl: `/api/session/${store.id}/complete`,
     statusUrl: `/api/session/${store.id}/status`,
     endUrl: `/api/session/${store.id}/end`,
+    reviewUrl: `/api/session/${store.id}/review`,
   };
 }
 
-export async function startPairPlanServer(config: PairPlanServerConfig): Promise<PairPlanServerRuntime> {
+export async function startHoneServer(config: HoneServerConfig): Promise<HoneServerRuntime> {
   const artifact = await resolveArtifactPath(config.artifactInput, config.configuredRoot);
   const sessionId = sessionIdForPath(artifact.filePath);
   const store = await SessionStore.open({
@@ -182,8 +212,16 @@ export async function startPairPlanServer(config: PairPlanServerConfig): Promise
 
   const clientRoot = join(dirname(fileURLToPath(import.meta.url)), "client");
   const indexHtml = await readFile(join(clientRoot, "index.html"), "utf8");
-  const clientModule = await readFile(join(clientRoot, "app.ts"), "utf8");
-  const clientJavascript = new Bun.Transpiler({ loader: "ts", target: "browser" }).transformSync(clientModule);
+  const clientBuild = await Bun.build({
+    entrypoints: [join(clientRoot, "app.ts")],
+    target: "browser",
+    format: "esm",
+    minify: false,
+  });
+  if (!clientBuild.success || !clientBuild.outputs[0]) {
+    throw new Error(`Could not build Hone client: ${clientBuild.logs.map(String).join("\n")}`);
+  }
+  const clientJavascript = await clientBuild.outputs[0].text();
   const clientStyles = await readFile(join(clientRoot, "styles.css"), "utf8");
   const sessionPrefix = `/api/session/${store.id}`;
 
@@ -249,7 +287,7 @@ export async function startPairPlanServer(config: PairPlanServerConfig): Promise
 
   async function route(request: Request): Promise<Response> {
     touch();
-    if (!isLocalRequest(request)) return text("Pair Plan only accepts loopback requests.", "text/plain; charset=utf-8", 403);
+    if (!isLocalRequest(request)) return text("Hone only accepts loopback requests.", "text/plain; charset=utf-8", 403);
 
     const url = new URL(request.url);
     const pathname = url.pathname;
@@ -262,6 +300,21 @@ export async function startPairPlanServer(config: PairPlanServerConfig): Promise
     if (request.method === "GET" && pathname === "/client/styles.css") return text(clientStyles, "text/css; charset=utf-8");
     if (request.method === "GET" && pathname === "/client/app.ts") return text(clientJavascript, "text/javascript; charset=utf-8");
     if (request.method === "GET" && pathname === "/api/session") return json(sessionPayload(store));
+    if (request.method === "GET" && pathname === "/api/artifacts") {
+      const runtimes = await listRuntimes(config.stateDir);
+      const artifacts = runtimes
+        .filter((runtime) => runtime.artifactPath.startsWith(`${store.rootPath}/`) || runtime.artifactPath === store.filePath)
+        .map((runtime) => ({
+          id: runtime.sessionId,
+          name: basename(runtime.artifactPath),
+          filePath: runtime.artifactPath,
+          url: `http://127.0.0.1:${runtime.port}`,
+          active: runtime.sessionId === store.id,
+          revision: runtime.session?.artifactRevision ?? 1,
+          hasReview: Boolean(runtime.session?.review),
+        }));
+      return json({ artifacts });
+    }
     if (pathname === "/api/session" || !pathname.startsWith(sessionPrefix)) return notFound();
 
     const artifactPrefix = `${sessionPrefix}/artifact`;
@@ -342,6 +395,17 @@ export async function startPairPlanServer(config: PairPlanServerConfig): Promise
       }
     }
 
+    if (request.method === "POST" && pathname === `${sessionPrefix}/review`) {
+      const payload = await parseJson(request);
+      if (!payload) return badRequest("Expected a JSON review payload.");
+      try {
+        const review = await store.setReview(normalizeReview(payload));
+        return json({ review, snapshot: store.getSnapshot() }, 201);
+      } catch (error) {
+        return badRequest(error instanceof Error ? error.message : "Invalid review payload.");
+      }
+    }
+
     if (request.method === "POST" && pathname === `${sessionPrefix}/status`) {
       const payload = await parseJson(request);
       const status = payload?.status;
@@ -403,8 +467,8 @@ export async function startPairPlanServer(config: PairPlanServerConfig): Promise
 
 if (import.meta.main) {
   try {
-    const runtime = await startPairPlanServer({ ...parseServerConfig(), installSignalHandlers: true });
-    console.log(`Pair Plan listening at http://127.0.0.1:${runtime.port}`);
+    const runtime = await startHoneServer({ ...parseServerConfig(), installSignalHandlers: true });
+    console.log(`Hone listening at http://127.0.0.1:${runtime.port}`);
     console.log(`Reviewing ${runtime.artifact.filePath}`);
     console.log(`Session ${runtime.store.id}`);
   } catch (error) {

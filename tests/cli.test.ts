@@ -15,15 +15,56 @@ async function runCli(...args: string[]) {
 test("prints the agent-facing CLI contract", async () => {
   const result = await runCli("--help");
   expect(result.exitCode).toBe(0);
-  expect(result.stdout).toContain("pair-plan poll <artifact>");
-  expect(result.stdout).toContain("pair-plan complete <artifact>");
-  expect(result.stdout).toContain("pair-plan stop <artifact>");
-  expect(result.stdout).toContain("pair-plan recent [--limit 20]");
+  expect(result.stdout).toContain("hone poll <artifact>");
+  expect(result.stdout).toContain("hone complete <artifact>");
+  expect(result.stdout).toContain("hone review <artifact>");
+  expect(result.stdout).toContain("hone stop <artifact>");
+  expect(result.stdout).toContain("hone recent [--limit 20]");
   expect(result.stderr).toBe("");
 });
 
+test("open attaches multiple artifacts and exposes them to the dropdown", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hone-attachments-test-"));
+  const first = join(directory, "first.html");
+  const second = join(directory, "second.html");
+  const patchPath = join(directory, "review.diff");
+  const findingsPath = join(directory, "findings.json");
+  const stateDir = join(directory, "state");
+  const portProbe = Bun.serve({ port: 0, fetch: () => new Response("probe") });
+  const port = portProbe.port!;
+  await portProbe.stop(true);
+  const commonArgs = ["--root", directory, "--state-dir", stateDir, "--port", String(port), "--idle-timeout-ms", "0"];
+
+  try {
+    await writeFile(first, "<main>First</main>", "utf8");
+    await writeFile(second, "<main>Second</main>", "utf8");
+    const opened = await runCli(first, second, "--no-open", ...commonArgs);
+    expect(opened.exitCode).toBe(0);
+    const payload = JSON.parse(opened.stdout.trim()) as { url: string; artifacts: unknown[] };
+    expect(payload.artifacts).toHaveLength(2);
+    const artifactsResponse = await fetch(`${payload.url}/api/artifacts`);
+    const artifactsPayload = await artifactsResponse.json() as { artifacts: Array<{ name: string }> };
+    expect(artifactsPayload.artifacts.map((artifact) => artifact.name).sort()).toEqual(["first.html", "second.html"]);
+
+    await writeFile(patchPath, "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n", "utf8");
+    await writeFile(findingsPath, JSON.stringify([{ file: "a.ts", line: 1, severity: "warning", title: "Check behavior", body: "Confirm this change." }]), "utf8");
+    const reviewed = await runCli("review", first, "--patch-file", patchPath, "--findings-file", findingsPath, "--no-open", ...commonArgs);
+    expect(reviewed.exitCode).toBe(0);
+    const reviewPayload = JSON.parse(reviewed.stdout.trim()) as { external_posted: boolean; findings: number };
+    expect(reviewPayload.external_posted).toBe(false);
+    expect(reviewPayload.findings).toBe(1);
+    const sessionResponse = await fetch(`${payload.url}/api/session`);
+    const sessionPayload = await sessionResponse.json() as { review?: { findings: unknown[] } };
+    expect(sessionPayload.review?.findings).toHaveLength(1);
+  } finally {
+    await runCli("stop", first, "--state-dir", stateDir);
+    await runCli("stop", second, "--state-dir", stateDir);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("recent lists known artifacts as date-and-path lines", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "pair-plan-recent-test-"));
+  const directory = await mkdtemp(join(tmpdir(), "hone-recent-test-"));
   const artifactPath = join(directory, "recent-plan.html");
   const stateDir = join(directory, "state");
 
@@ -49,7 +90,7 @@ test("recent lists known artifacts as date-and-path lines", async () => {
 });
 
 test("open and complete point the agent back into the poll loop", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "pair-plan-cli-test-"));
+  const directory = await mkdtemp(join(tmpdir(), "hone-cli-test-"));
   const artifactPath = join(directory, "plan's review.html");
   const stateDir = join(directory, "state");
   const portProbe = Bun.serve({ port: 0, fetch: () => new Response("probe") });
@@ -62,7 +103,7 @@ test("open and complete point the agent back into the poll loop", async () => {
     const opened = await runCli(artifactPath, "--no-open", ...commonArgs);
     expect(opened.exitCode).toBe(0);
     const openPayload = JSON.parse(opened.stdout.trim()) as Record<string, unknown>;
-    expect(openPayload.next_command).toContain("pair-plan poll");
+    expect(openPayload.next_command).toContain("hone poll");
     expect(openPayload.next_command).toContain("plan'\"'\"'s review.html");
 
     const feedbackResponse = await fetch(`${String(openPayload.url)}/api/session/${String(openPayload.session_id)}/feedback`, {
@@ -75,7 +116,7 @@ test("open and complete point the agent back into the poll loop", async () => {
     const polled = await runCli("poll", artifactPath, ...commonArgs);
     expect(polled.exitCode).toBe(0);
     const pollPayload = JSON.parse(polled.stdout.trim()) as Record<string, unknown>;
-    expect(pollPayload.next_command).toContain("pair-plan complete");
+    expect(pollPayload.next_command).toContain("hone complete");
 
     const completed = await runCli(
       "complete",

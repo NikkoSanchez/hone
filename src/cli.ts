@@ -2,12 +2,13 @@
 
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { PairPlanAgentClient } from "./agent-client";
+import { readFile } from "node:fs/promises";
+import { HoneAgentClient } from "./agent-client";
 import { defaultStateDir } from "./server";
 import { ensureServer, listRecentArtifacts, listRuntimes, resolveCliArtifact, stopServer, type SessionHandle } from "./runtime";
-import { isFeedbackEnded, type AgentReply } from "./types";
+import { isFeedbackEnded, type AgentReply, type CodeReviewFinding } from "./types";
 
-const COMMANDS = new Set(["open", "poll", "complete", "status", "recent", "end", "server", "stop", "reopen", "help"]);
+const COMMANDS = new Set(["open", "poll", "complete", "review", "status", "recent", "end", "server", "stop", "reopen", "help"]);
 const VALUE_FLAGS = new Set([
   "--artifact",
   "--root",
@@ -22,24 +23,29 @@ const VALUE_FLAGS = new Set([
   "--body",
   "--by",
   "--limit",
+  "--patch-file",
+  "--findings-file",
+  "--source",
 ]);
 
-const HELP = `Pair Plan · local agent review loop
+const HELP = `Hone · local agent review loop
 
 Usage:
-  pair-plan <artifact> [--no-open] [--reopen]
-  pair-plan poll <artifact> [--timeout-ms 30000] [--reopen]
-  pair-plan complete <artifact> --batch-id ID --summary TEXT [--revision N] [--changed ANCHOR]
-  pair-plan status [artifact]
-  pair-plan recent [--limit 20]
-  pair-plan end <artifact>
-  pair-plan server <artifact>
-  pair-plan stop <artifact>
+  hone <artifact> [artifact...] [--no-open] [--reopen]
+  hone poll <artifact> [--timeout-ms 30000] [--reopen]
+  hone complete <artifact> --batch-id ID --summary TEXT [--revision N] [--changed ANCHOR]
+  hone review <artifact> --patch-file PATH [--findings-file PATH] [--summary TEXT]
+  hone status [artifact]
+  hone recent [--limit 20]
+  hone end <artifact>
+  hone server <artifact>
+  hone stop <artifact>
 
 Commands:
   open       Ensure the local server/session and print its review URL.
   poll       Wait for one feedback batch and print compact JSON to stdout.
   complete   Atomically acknowledge a batch and post the agent reply.
+  review     Import an agent code review for local pairing (never posts externally).
   status     Show healthy local runtimes, or one artifact's state.
   recent     List known artifacts as date-and-path lines, newest first.
   end        End a session without deleting its artifact or history.
@@ -48,7 +54,7 @@ Commands:
   reopen     Reopen an ended session explicitly.
 
 Common options:
-  --state-dir PATH          Session state directory (default: ~/.pair-plan/sessions)
+  --state-dir PATH          Session state directory (default: ~/.hone/sessions)
   --root PATH               Artifact asset root
   --port PORT               Local server port (default: 8765)
   --idle-timeout-ms MS      Daemon idle timeout (default: 1800000; 0 disables)
@@ -58,9 +64,9 @@ Common options:
   --help                    Show this help
 
 Agent loop:
-  pair-plan plan.html --no-open
-  pair-plan poll plan.html
-  pair-plan complete plan.html --batch-id BATCH_ID --summary "Updated the plan" --revision 2
+  hone plan.html --no-open
+  hone poll plan.html
+  hone complete plan.html --batch-id BATCH_ID --summary "Updated the plan" --revision 2
 
 Successful open and complete responses include the exact next_command. Keep
 following it until poll returns an ended session.
@@ -136,17 +142,17 @@ function numberOption(args: string[], name: string, fallback: number): number {
 }
 
 function idleTimeoutOption(args: string[]): number {
-  const value = flagValue(args, "--idle-timeout-ms") ?? Bun.env.PAIR_PLAN_IDLE_TIMEOUT_MS;
+  const value = flagValue(args, "--idle-timeout-ms") ?? Bun.env.HONE_IDLE_TIMEOUT_MS;
   if (value?.toLowerCase() === "off") return 0;
   return Math.max(0, numberOption(args, "--idle-timeout-ms", 30 * 60 * 1_000));
 }
 
 function stateDirectory(args: string[]): string {
-  return resolve(flagValue(args, "--state-dir") ?? Bun.env.PAIR_PLAN_STATE_DIR ?? defaultStateDir());
+  return resolve(flagValue(args, "--state-dir") ?? Bun.env.HONE_STATE_DIR ?? defaultStateDir());
 }
 
 function portOption(args: string[]): number {
-  return Math.max(1, Math.min(65_535, Math.floor(numberOption(args, "--port", Number(Bun.env.PAIR_PLAN_PORT ?? 8765)))));
+  return Math.max(1, Math.min(65_535, Math.floor(numberOption(args, "--port", Number(Bun.env.HONE_PORT ?? 8765)))));
 }
 
 function output(value: unknown): void {
@@ -162,7 +168,7 @@ function commandContext(current: CliContext): string {
 }
 
 function pollCommand(current: CliContext): string {
-  return `pair-plan poll ${commandContext(current)}`;
+  return `hone poll ${commandContext(current)}`;
 }
 
 function openReviewUrl(url: string): void {
@@ -175,8 +181,8 @@ function openReviewUrl(url: string): void {
   }
 }
 
-async function context(args: string[], required = true): Promise<CliContext | null> {
-  const input = artifactInput(args, required);
+async function context(args: string[], required = true, inputOverride?: string, portOverride?: number): Promise<CliContext | null> {
+  const input = inputOverride ?? artifactInput(args, required);
   if (!input) {
     if (required) throw new Error("An artifact path is required.");
     return null;
@@ -187,7 +193,7 @@ async function context(args: string[], required = true): Promise<CliContext | nu
     artifactPath: resolved.filePath,
     rootPath: resolved.rootPath,
     stateDir,
-    port: portOption(args),
+    port: portOverride ?? portOption(args),
     idleTimeoutMs: idleTimeoutOption(args),
     reopen: hasFlag(args, "--reopen"),
   });
@@ -203,7 +209,22 @@ async function context(args: string[], required = true): Promise<CliContext | nu
 }
 
 async function runOpen(args: string[]): Promise<void> {
-  const current = await context(args);
+  const inputs = flagValue(args, "--artifact") ? [flagValue(args, "--artifact")!] : positionalArgs(args);
+  if (inputs.length === 0) throw new Error("At least one artifact path is required.");
+  const running = await listRuntimes(stateDirectory(args));
+  const usedPorts = new Set(running.map((runtime) => runtime.port));
+  let candidatePort = portOption(args);
+  const attached: CliContext[] = [];
+  for (const input of inputs) {
+    const existing = running.find((runtime) => runtime.artifactPath === resolve(input));
+    while (!existing && usedPorts.has(candidatePort)) candidatePort += 1;
+    const current = await context(args, true, input, existing?.port ?? candidatePort);
+    if (!current) continue;
+    attached.push(current);
+    usedPorts.add(current.port);
+    candidatePort = Math.max(candidatePort + 1, current.port + 1);
+  }
+  const current = attached[0];
   if (!current) return;
   const url = current.handle.baseUrl;
   if (!hasFlag(args, "--no-open")) openReviewUrl(url);
@@ -215,14 +236,51 @@ async function runOpen(args: string[]): Promise<void> {
     url,
     port: current.port,
     ended_at: current.handle.session.endedAt,
+    artifacts: attached.map((item) => ({ artifact: item.artifactPath, session_id: item.handle.session.id, url: item.handle.baseUrl })),
     ...(!current.handle.session.endedAt ? { next_command: pollCommand(current) } : {}),
+  });
+}
+
+async function runReview(args: string[]): Promise<void> {
+  const current = await context(args);
+  if (!current) return;
+  const patchFile = flagValue(args, "--patch-file");
+  if (!patchFile) throw new Error("review requires --patch-file.");
+  const patch = await readFile(resolve(patchFile), "utf8");
+  const findingsFile = flagValue(args, "--findings-file");
+  let findings: CodeReviewFinding[] = [];
+  if (findingsFile) {
+    const parsed = JSON.parse(await readFile(resolve(findingsFile), "utf8")) as unknown;
+    const values = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as { findings?: unknown }).findings)
+        ? (parsed as { findings: unknown[] }).findings
+        : null;
+    if (!values) throw new Error("findings file must contain an array or an object with a findings array.");
+    findings = values as CodeReviewFinding[];
+  }
+  const client = new HoneAgentClient(current.handle.baseUrl, current.handle.session.id);
+  await client.review({
+    patch,
+    findings,
+    ...(flagValue(args, "--summary") ? { summary: flagValue(args, "--summary") } : {}),
+    source: flagValue(args, "--source") ?? "agent review",
+  });
+  if (!hasFlag(args, "--no-open")) openReviewUrl(`${current.handle.baseUrl}/?view=review`);
+  output({
+    status: "review-imported",
+    artifact: current.artifactPath,
+    session_id: current.handle.session.id,
+    url: `${current.handle.baseUrl}/?view=review`,
+    findings: findings.length,
+    external_posted: false,
   });
 }
 
 async function runPoll(args: string[]): Promise<void> {
   const current = await context(args);
   if (!current) return;
-  const client = new PairPlanAgentClient(current.handle.baseUrl, current.handle.session.id);
+  const client = new HoneAgentClient(current.handle.baseUrl, current.handle.session.id);
 
   const controller = new AbortController();
   const onSignal = () => controller.abort();
@@ -242,7 +300,7 @@ async function runPoll(args: string[]): Promise<void> {
       output({
         ...result,
         status: "feedback",
-        next_command: `pair-plan complete ${commandContext(current)} --batch-id ${shellArgument(result.batchId)} --summary '<summary>' --revision ${result.revision}`,
+        next_command: `hone complete ${commandContext(current)} --batch-id ${shellArgument(result.batchId)} --summary '<summary>' --revision ${result.revision}`,
       });
       return;
     }
@@ -264,7 +322,7 @@ async function runComplete(args: string[]): Promise<void> {
     ...(flagValue(args, "--revision") ? { revision: Math.max(1, Math.floor(Number(flagValue(args, "--revision")))) } : {}),
     ...(flagValues(args, "--changed").length ? { changedAnchors: flagValues(args, "--changed") } : {}),
   };
-  const client = new PairPlanAgentClient(current.handle.baseUrl, current.handle.session.id);
+  const client = new HoneAgentClient(current.handle.baseUrl, current.handle.session.id);
   await client.complete(batchId, reply);
   output({ status: "completed", artifact: current.artifactPath, batch_id: batchId, ...reply, next_command: pollCommand(current) });
 }
@@ -296,7 +354,7 @@ async function runRecent(args: string[]): Promise<void> {
 async function runEnd(args: string[]): Promise<void> {
   const current = await context(args);
   if (!current) return;
-  const client = new PairPlanAgentClient(current.handle.baseUrl, current.handle.session.id);
+  const client = new HoneAgentClient(current.handle.baseUrl, current.handle.session.id);
   await client.end((flagValue(args, "--by") as "agent" | "user" | undefined) ?? "agent");
   output({ status: "ended", artifact: current.artifactPath, session_id: current.handle.session.id });
 }
@@ -318,8 +376,8 @@ async function runStop(args: string[]): Promise<void> {
 async function runForegroundServer(args: string[]): Promise<void> {
   const input = artifactInput(args);
   if (!input) throw new Error("server requires an artifact path.");
-  const { startPairPlanServer } = await import("./server");
-  const runtime = await startPairPlanServer({
+  const { startHoneServer } = await import("./server");
+  const runtime = await startHoneServer({
     artifactInput: input,
     configuredRoot: flagValue(args, "--root"),
     stateDir: stateDirectory(args),
@@ -327,7 +385,7 @@ async function runForegroundServer(args: string[]): Promise<void> {
     idleTimeoutMs: idleTimeoutOption(args),
     installSignalHandlers: true,
   });
-  console.error(`Pair Plan listening at http://127.0.0.1:${runtime.port}`);
+  console.error(`Hone listening at http://127.0.0.1:${runtime.port}`);
   console.error(`Reviewing ${runtime.artifact.filePath}`);
   await new Promise<void>(() => undefined);
 }
@@ -341,6 +399,7 @@ async function main(): Promise<void> {
   if (parsed.command === "open") return runOpen(parsed.args);
   if (parsed.command === "poll") return runPoll(parsed.args);
   if (parsed.command === "complete") return runComplete(parsed.args);
+  if (parsed.command === "review") return runReview(parsed.args);
   if (parsed.command === "status") return runStatus(parsed.args);
   if (parsed.command === "recent") return runRecent(parsed.args);
   if (parsed.command === "end") return runEnd(parsed.args);
@@ -352,6 +411,6 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`pair-plan: ${message}\n`);
+  process.stderr.write(`hone: ${message}\n`);
   process.exitCode = 1;
 });

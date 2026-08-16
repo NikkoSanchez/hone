@@ -6,7 +6,7 @@ import { SessionStore } from "../src/session-store";
 import { isFeedbackEnded, isFeedbackEnvelope } from "../src/types";
 
 async function createStore() {
-  const directory = await mkdtemp(join(tmpdir(), "pair-plan-test-"));
+  const directory = await mkdtemp(join(tmpdir(), "hone-test-"));
   const artifactPath = join(directory, "plan.html");
   await writeFile(artifactPath, "<main><h1>Plan</h1></main>", "utf8");
   const store = await SessionStore.open({
@@ -133,6 +133,22 @@ describe("SessionStore", () => {
       await store.reopen();
       expect(store.snapshot.endedAt).toBeUndefined();
       expect(store.snapshot.agentStatus).toBe("offline");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("stores an imported code review without publishing it externally", async () => {
+    const { directory, store } = await createStore();
+    try {
+      const review = await store.setReview({
+        patch: "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n",
+        source: "test agent",
+        findings: [{ file: "a.ts", line: 1, severity: "warning", title: "Check behavior", body: "Confirm this change is intentional." }],
+      });
+      expect(review.findings).toHaveLength(1);
+      expect(store.snapshot.review?.source).toBe("test agent");
+      expect(store.snapshot.review?.findings[0]?.severity).toBe("warning");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

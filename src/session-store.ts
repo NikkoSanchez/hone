@@ -15,6 +15,8 @@ import type {
   SessionSnapshot,
   SessionEndBy,
   StoredSessionState,
+  CodeReview,
+  CodeReviewInput,
 } from "./types";
 import { hashText } from "./path-safety";
 
@@ -94,6 +96,7 @@ export class SessionStore {
       updatedAt: now(),
       ...(existing?.endedAt ? { endedAt: existing.endedAt } : {}),
       ...(existing?.endedBy ? { endedBy: existing.endedBy } : {}),
+      ...(existing?.review ? { review: existing.review } : {}),
     };
 
     const store = new SessionStore(options, state);
@@ -117,7 +120,30 @@ export class SessionStore {
       deliveryBatchId: this.state.delivery?.batchId ?? null,
       ...(this.state.endedAt ? { endedAt: this.state.endedAt } : {}),
       ...(this.state.endedBy ? { endedBy: this.state.endedBy } : {}),
+      ...(this.state.review ? { review: clone(this.state.review) } : {}),
     };
+  }
+
+  async setReview(input: CodeReviewInput): Promise<CodeReview> {
+    const review: CodeReview = {
+      patch: input.patch,
+      findings: (input.findings ?? []).map((finding) => ({
+        id: finding.id?.trim() || `finding-${randomUUID()}`,
+        file: finding.file,
+        ...(typeof finding.line === "number" ? { line: Math.max(1, Math.floor(finding.line)) } : {}),
+        ...(finding.side === "deletions" || finding.side === "additions" ? { side: finding.side } : {}),
+        severity: finding.severity === "error" || finding.severity === "warning" ? finding.severity : "info",
+        title: finding.title,
+        body: finding.body,
+      })),
+      ...(input.summary ? { summary: input.summary } : {}),
+      ...(input.source ? { source: input.source } : {}),
+      createdAt: now(),
+    };
+    this.state.review = review;
+    await this.persist();
+    this.publish("review");
+    return clone(review);
   }
 
   subscribe(listener: EventListener): () => void {
@@ -252,7 +278,7 @@ export class SessionStore {
 
   close(): void {
     this.cancelPollOffline();
-    const error = new Error("Pair Plan session store closed");
+    const error = new Error("Hone session store closed");
     for (const waiter of [...this.waiters]) {
       this.removeWaiter(waiter);
       waiter.reject(error);

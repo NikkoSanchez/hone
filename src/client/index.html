@@ -4,14 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
-    <title>Pair Plan · Local review loop</title>
+    <title>Hone · Local review loop</title>
     <link rel="stylesheet" href="/client/styles.css" />
   </head>
   <body>
     <div class="app-shell" id="appShell">
       <header class="topbar">
         <div class="brand-mark" aria-hidden="true">↗</div>
-        <div class="brand-copy"><strong>Pair Plan</strong><span>local review loop</span></div>
+        <div class="brand-copy"><strong>Hone</strong><span>local review loop</span></div>
         <div class="session-chip">
           <span class="state-dot is-offline" id="topStatusDot"></span>
           <span>Agent session</span>
@@ -35,8 +35,10 @@
 
       <main class="workspace">
         <div class="workspace-toolbar">
-          <div class="artifact-location"><span>ARTIFACT</span><strong id="artifactFile">loading…</strong></div>
+          <div class="artifact-location"><span>ARTIFACT</span><select id="artifactSelect" aria-label="Open artifact"><option>loading…</option></select><strong id="artifactFile">loading…</strong></div>
           <div class="toolbar-actions">
+            <button class="surface-button is-active" type="button" data-surface="artifact">Artifact</button>
+            <button class="surface-button" id="reviewSurfaceButton" type="button" data-surface="review" hidden>Code review</button>
             <button class="mode-button is-active" type="button" data-mode="annotate">Annotate</button>
             <button class="mode-button" type="button" data-mode="explore">Explore</button>
             <button class="icon-button" id="reloadArtifact" type="button" aria-label="Reload artifact">↻</button>
@@ -45,6 +47,10 @@
         <div class="artifact-stage">
           <iframe id="artifactFrame" title="Reviewed artifact"></iframe>
           <div class="artifact-loading" id="artifactLoading">Loading artifact…</div>
+        </div>
+        <div class="review-stage" id="reviewStage" hidden>
+          <div class="review-summary" id="reviewSummary"></div>
+          <div class="diff-list" id="diffList"></div>
         </div>
       </main>
 
@@ -56,6 +62,7 @@
         <div class="rail-tabs" role="tablist" aria-label="Conversation views">
           <button class="rail-tab is-active" type="button" data-view="queue">Queue <span id="queueTabCount">0</span></button>
           <button class="rail-tab" type="button" data-view="history">History</button>
+          <button class="rail-tab" id="reviewTab" type="button" data-view="review" hidden>Review <span id="reviewCount">0</span></button>
         </div>
 
         <section class="rail-view" id="queueView">
@@ -73,6 +80,10 @@
         <section class="rail-view" id="historyView" hidden>
           <div class="feed-label">DELIVERED HISTORY</div>
           <div id="historyList" class="history-list"></div>
+        </section>
+        <section class="rail-view" id="reviewView" hidden>
+          <div class="feed-label review-feed-label"><span>AGENT FINDINGS</span><button id="copyReview" type="button">Copy GH output</button></div>
+          <div id="reviewList" class="review-list"></div>
         </section>
         <div class="rail-footer">Comments stay local until Send to Agent. The agent receives one feedback envelope, then returns a compact revision result.</div>
       </aside>

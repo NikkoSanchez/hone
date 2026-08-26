@@ -25,9 +25,9 @@
       </header>
 
       <aside class="sidebar" aria-label="Session navigation">
-        <div class="sidebar-label">SESSION</div>
-        <button class="nav-item is-active" type="button" data-nav="canvas">◉ <span>Plan canvas</span></button>
-        <button class="nav-item" type="button" data-nav="queue">✦ <span>Feedback queue</span><b id="sidebarQueueCount">0</b></button>
+        <div class="sidebar-topline"><div class="sidebar-label">SESSION</div><button class="sidebar-toggle" id="toggleSidebar" type="button" aria-label="Collapse navigation" aria-expanded="true" title="Collapse navigation">‹</button></div>
+        <button class="nav-item is-active" type="button" data-nav="canvas" title="Plan canvas">◉ <span>Plan canvas</span></button>
+        <button class="nav-item" type="button" data-nav="queue" title="Feedback queue">✦ <span>Feedback queue</span><b id="sidebarQueueCount">0</b></button>
         <div class="sidebar-label section-label">PLAN SECTIONS</div>
         <nav class="section-list" id="sectionList" aria-label="Plan sections"></nav>
         <div class="sidebar-footer"><span class="live-dot is-offline" id="sidebarStatusDot"></span><strong id="sidebarStatus">Agent offline</strong><p id="sidebarStatusDetail">Feedback will remain queued until an agent polls.</p></div>
@@ -35,7 +35,7 @@
 
       <main class="workspace">
         <div class="workspace-toolbar">
-          <div class="artifact-location"><span>ARTIFACT</span><select id="artifactSelect" aria-label="Open artifact"><option>loading…</option></select><strong id="artifactFile">loading…</strong></div>
+          <div class="artifact-location"><span>ARTIFACT</span><select id="artifactSelect" aria-label="Open artifact"><option>loading…</option></select><button class="copy-artifact" id="copyArtifact" type="button" title="Copy the current artifact path">Copy path</button><strong id="artifactFile">loading…</strong></div>
           <div class="toolbar-actions">
             <button class="surface-button is-active" type="button" data-surface="artifact">Artifact</button>
             <button class="surface-button" id="reviewSurfaceButton" type="button" data-surface="review" hidden>Code review</button>
@@ -55,6 +55,7 @@
       </main>
 
       <aside class="right-rail" id="rightRail" aria-label="Feedback queue and conversation">
+        <div class="rail-resizer" id="railResizer" role="separator" aria-label="Resize conversation pane" aria-orientation="vertical" aria-valuemin="280" tabindex="0"></div>
         <div class="rail-header">
           <div><strong>Conversation</strong><span class="queue-badge" id="queueCount">0</span></div>
           <span class="agent-state"><span class="state-dot is-offline" id="railStatusDot"></span><span id="agentStatus">Offline</span></span>

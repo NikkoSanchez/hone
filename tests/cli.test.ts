@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
@@ -19,8 +19,48 @@ test("prints the agent-facing CLI contract", async () => {
   expect(result.stdout).toContain("hone complete <artifact>");
   expect(result.stdout).toContain("hone review <artifact>");
   expect(result.stdout).toContain("hone stop <artifact>");
+  expect(result.stdout).toContain("hone stop --all");
   expect(result.stdout).toContain("hone recent [--limit 20]");
   expect(result.stderr).toBe("");
+});
+
+test("stop --all stops every daemon in the state directory", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hone-stop-all-test-"));
+  const first = join(directory, "first.html");
+  const second = join(directory, "second.html");
+  const stateDir = join(directory, "state");
+  const firstProbe = Bun.serve({ port: 0, fetch: () => new Response("probe") });
+  const firstPort = firstProbe.port!;
+  await firstProbe.stop(true);
+  const secondProbe = Bun.serve({ port: 0, fetch: () => new Response("probe") });
+  const secondPort = secondProbe.port!;
+  await secondProbe.stop(true);
+  const commonArgs = ["--root", directory, "--state-dir", stateDir, "--idle-timeout-ms", "0"];
+
+  try {
+    await writeFile(first, "<main>First</main>", "utf8");
+    await writeFile(second, "<main>Second</main>", "utf8");
+    const expectedFirst = await realpath(first);
+    const expectedSecond = await realpath(second);
+    const firstOpen = await runCli(first, "--no-open", "--port", String(firstPort), ...commonArgs);
+    const secondOpen = await runCli(second, "--no-open", "--port", String(secondPort), ...commonArgs);
+    expect(firstOpen.exitCode).toBe(0);
+    expect(secondOpen.exitCode).toBe(0);
+
+    const stopped = await runCli("stop", "--all", "--state-dir", stateDir);
+    expect(stopped.exitCode).toBe(0);
+    expect(JSON.parse(stopped.stdout.trim())).toEqual({
+      status: "stopped",
+      count: 2,
+      artifacts: [expectedFirst, expectedSecond],
+    });
+
+    const status = await runCli("status", "--state-dir", stateDir);
+    expect(JSON.parse(status.stdout.trim()).runtimes).toEqual([]);
+  } finally {
+    await runCli("stop", "--all", "--state-dir", stateDir);
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("open attaches multiple artifacts and exposes them to the dropdown", async () => {
@@ -40,8 +80,10 @@ test("open attaches multiple artifacts and exposes them to the dropdown", async 
     await writeFile(second, "<main>Second</main>", "utf8");
     const opened = await runCli(first, second, "--no-open", ...commonArgs);
     expect(opened.exitCode).toBe(0);
-    const payload = JSON.parse(opened.stdout.trim()) as { url: string; artifacts: unknown[] };
+    const payload = JSON.parse(opened.stdout.trim()) as { url: string; artifacts: Array<{ url: string; review_url: string }> };
     expect(payload.artifacts).toHaveLength(2);
+    expect(payload.artifacts.map((artifact) => artifact.url)).toEqual([payload.url, payload.url]);
+    expect(payload.artifacts.every((artifact) => artifact.review_url.includes("?artifact="))).toBe(true);
     const artifactsResponse = await fetch(`${payload.url}/api/artifacts`);
     const artifactsPayload = await artifactsResponse.json() as { artifacts: Array<{ name: string }> };
     expect(artifactsPayload.artifacts.map((artifact) => artifact.name).sort()).toEqual(["first.html", "second.html"]);
@@ -56,9 +98,13 @@ test("open attaches multiple artifacts and exposes them to the dropdown", async 
     const sessionResponse = await fetch(`${payload.url}/api/session`);
     const sessionPayload = await sessionResponse.json() as { review?: { findings: unknown[] } };
     expect(sessionPayload.review?.findings).toHaveLength(1);
+
+    const stoppedFirst = await runCli("stop", first, "--state-dir", stateDir);
+    expect(JSON.parse(stoppedFirst.stdout.trim()).status).toBe("stopped");
+    const secondSession = await fetch(`${payload.url}/api/session/${payload.artifacts[1]!.review_url.split("artifact=")[1]}`);
+    expect(secondSession.ok).toBe(true);
   } finally {
-    await runCli("stop", first, "--state-dir", stateDir);
-    await runCli("stop", second, "--state-dir", stateDir);
+    await runCli("stop", "--all", "--state-dir", stateDir);
     await rm(directory, { recursive: true, force: true });
   }
 });

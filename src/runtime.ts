@@ -25,6 +25,7 @@ export interface RecentArtifactRecord {
 }
 
 export interface SessionPayload extends SessionSnapshot {
+  rootPath: string;
   artifactUrl: string;
   eventsUrl: string;
   feedbackUrl: string;
@@ -112,12 +113,25 @@ function isPersistedArtifactSession(value: unknown): value is PersistedArtifactS
 
 async function fetchSession(record: RuntimeRecord): Promise<SessionPayload | null> {
   try {
-    const response = await fetch(`http://127.0.0.1:${record.port}/api/session`, { signal: AbortSignal.timeout(800) });
+    const response = await fetch(`http://127.0.0.1:${record.port}/api/session/${record.sessionId}`, { signal: AbortSignal.timeout(800) });
     if (!response.ok) return null;
     const session = await response.json() as SessionPayload;
     return session.id === record.sessionId && session.filePath === record.artifactPath ? session : null;
   } catch {
     return null;
+  }
+}
+
+async function stopRuntime(runtime: RuntimeRecord): Promise<void> {
+  try {
+    process.kill(runtime.pid, "SIGTERM");
+  } catch {
+    // A dead process is already stopped; remove its stale registry entry.
+  }
+
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline && await fetchSession(runtime)) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 
@@ -191,6 +205,31 @@ export async function ensureServer(options: EnsureServerOptions): Promise<Sessio
     await writeRegistry(options.stateDir, registry);
   }
 
+  for (const sibling of registry.runtimes) {
+    const siblingSession = await fetchSession(sibling);
+    if (!siblingSession || siblingSession.rootPath !== options.rootPath) continue;
+    const payload = await postJson(`${baseUrl(sibling)}/api/artifacts`, { artifactPath: options.artifactPath });
+    const attached = payload.session as SessionPayload | undefined;
+    if (!attached || attached.id !== sessionId) throw new Error("Hone did not attach the artifact cleanly.");
+    const record: RuntimeRecord = {
+      artifactPath: options.artifactPath,
+      sessionId,
+      pid: sibling.pid,
+      port: sibling.port,
+      stateDir: options.stateDir,
+      startedAt: new Date().toISOString(),
+    };
+    registry.runtimes.push(record);
+    await writeRegistry(options.stateDir, registry);
+    if (attached.endedAt && options.reopen) {
+      await postJson(`${baseUrl(record)}/api/session/${sessionId}/reopen`, {});
+      const reopened = await fetchSession(record);
+      if (!reopened) throw new Error("Hone session did not reopen cleanly.");
+      return { record, baseUrl: baseUrl(record), session: reopened };
+    }
+    return { record, baseUrl: baseUrl(record), session: attached };
+  }
+
   const record = await spawnServer(options, sessionId);
   const session = await waitForSession(record).catch(async (error) => {
     try { process.kill(record.pid, "SIGTERM"); } catch { /* The child may already have exited. */ }
@@ -227,20 +266,40 @@ export async function stopServer(artifactPath: string, stateDir: string): Promis
   const runtime = registry.runtimes.find((candidate) => candidate.artifactPath === artifactPath);
   if (!runtime) return false;
 
-  try {
-    process.kill(runtime.pid, "SIGTERM");
-  } catch {
-    // A dead process is already stopped; remove its stale registry entry.
-  }
-
-  const deadline = Date.now() + 3_000;
-  while (Date.now() < deadline && await fetchSession(runtime)) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  const siblings = registry.runtimes.filter((candidate) => candidate !== runtime && candidate.pid === runtime.pid && candidate.port === runtime.port);
+  if (siblings.length > 0) {
+    const response = await fetch(`${baseUrl(runtime)}/api/session/${runtime.sessionId}/detach`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    if (!response.ok) {
+      // If the shared daemon could not detach cleanly, remove the whole stale
+      // runtime group and let sibling artifacts restart on their next use.
+      await stopRuntime(runtime);
+      registry.runtimes = registry.runtimes.filter((candidate) => candidate.pid !== runtime.pid || candidate.port !== runtime.port);
+      await writeRegistry(stateDir, registry);
+      return true;
+    }
+  } else {
+    await stopRuntime(runtime);
   }
 
   registry.runtimes = registry.runtimes.filter((candidate) => candidate !== runtime);
   await writeRegistry(stateDir, registry);
   return true;
+}
+
+export async function stopAllServers(stateDir: string): Promise<RuntimeRecord[]> {
+  const registry = await readRegistry(stateDir);
+  const runtimes = [...registry.runtimes];
+  const uniqueRuntimes = runtimes.filter((runtime, index) => runtimes.findIndex((candidate) => candidate.pid === runtime.pid && candidate.port === runtime.port) === index);
+  await Promise.all(uniqueRuntimes.map((runtime) => stopRuntime(runtime)));
+  if (runtimes.length > 0) {
+    registry.runtimes = [];
+    await writeRegistry(stateDir, registry);
+  }
+  return runtimes;
 }
 
 export async function listRuntimes(stateDir: string): Promise<Array<RuntimeRecord & { healthy: boolean; session?: SessionPayload }>> {

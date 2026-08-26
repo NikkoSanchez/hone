@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { HoneAgentClient } from "./agent-client";
 import { defaultStateDir } from "./server";
-import { ensureServer, listRecentArtifacts, listRuntimes, resolveCliArtifact, stopServer, type SessionHandle } from "./runtime";
+import { ensureServer, listRecentArtifacts, listRuntimes, resolveCliArtifact, stopAllServers, stopServer, type SessionHandle } from "./runtime";
 import { isFeedbackEnded, type AgentReply, type CodeReviewFinding } from "./types";
 
 const COMMANDS = new Set(["open", "poll", "complete", "review", "status", "recent", "end", "server", "stop", "reopen", "help"]);
@@ -40,6 +40,7 @@ Usage:
   hone end <artifact>
   hone server <artifact>
   hone stop <artifact>
+  hone stop --all
 
 Commands:
   open       Ensure the local server/session and print its review URL.
@@ -50,7 +51,7 @@ Commands:
   recent     List known artifacts as date-and-path lines, newest first.
   end        End a session without deleting its artifact or history.
   server     Run one server in the foreground for diagnostics.
-  stop       Stop the daemon for one artifact and remove its runtime record.
+  stop       Stop one daemon, or all daemons with --all, and remove runtime records.
   reopen     Reopen an ended session explicitly.
 
 Common options:
@@ -171,6 +172,12 @@ function pollCommand(current: CliContext): string {
   return `hone poll ${commandContext(current)}`;
 }
 
+function reviewUrl(current: CliContext, view?: "review"): string {
+  const query = new URLSearchParams({ artifact: current.handle.session.id });
+  if (view) query.set("view", view);
+  return `${current.handle.baseUrl}/?${query}`;
+}
+
 function openReviewUrl(url: string): void {
   if (process.platform === "darwin") {
     Bun.spawn(["open", url], { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true });
@@ -227,7 +234,7 @@ async function runOpen(args: string[]): Promise<void> {
   const current = attached[0];
   if (!current) return;
   const url = current.handle.baseUrl;
-  if (!hasFlag(args, "--no-open")) openReviewUrl(url);
+  if (!hasFlag(args, "--no-open")) openReviewUrl(reviewUrl(current));
   output({
     status: current.handle.session.endedAt ? "ended" : "ready",
     artifact: current.artifactPath,
@@ -236,7 +243,8 @@ async function runOpen(args: string[]): Promise<void> {
     url,
     port: current.port,
     ended_at: current.handle.session.endedAt,
-    artifacts: attached.map((item) => ({ artifact: item.artifactPath, session_id: item.handle.session.id, url: item.handle.baseUrl })),
+    review_url: reviewUrl(current),
+    artifacts: attached.map((item) => ({ artifact: item.artifactPath, session_id: item.handle.session.id, url: item.handle.baseUrl, review_url: reviewUrl(item) })),
     ...(!current.handle.session.endedAt ? { next_command: pollCommand(current) } : {}),
   });
 }
@@ -266,12 +274,12 @@ async function runReview(args: string[]): Promise<void> {
     ...(flagValue(args, "--summary") ? { summary: flagValue(args, "--summary") } : {}),
     source: flagValue(args, "--source") ?? "agent review",
   });
-  if (!hasFlag(args, "--no-open")) openReviewUrl(`${current.handle.baseUrl}/?view=review`);
+  if (!hasFlag(args, "--no-open")) openReviewUrl(reviewUrl(current, "review"));
   output({
     status: "review-imported",
     artifact: current.artifactPath,
     session_id: current.handle.session.id,
-    url: `${current.handle.baseUrl}/?view=review`,
+    url: reviewUrl(current, "review"),
     findings: findings.length,
     external_posted: false,
   });
@@ -362,10 +370,21 @@ async function runEnd(args: string[]): Promise<void> {
 async function runReopen(args: string[]): Promise<void> {
   const current = await context([...args, "--reopen"]);
   if (!current) return;
-  output({ status: "ready", artifact: current.artifactPath, session_id: current.handle.session.id, url: current.handle.baseUrl });
+  output({ status: "ready", artifact: current.artifactPath, session_id: current.handle.session.id, url: current.handle.baseUrl, review_url: reviewUrl(current) });
 }
 
 async function runStop(args: string[]): Promise<void> {
+  if (hasFlag(args, "--all")) {
+    if (artifactInput(args, false)) throw new Error("stop --all cannot be combined with an artifact path.");
+    const stopped = await stopAllServers(stateDirectory(args));
+    output({
+      status: stopped.length > 0 ? "stopped" : "not-running",
+      count: stopped.length,
+      artifacts: stopped.map((runtime) => runtime.artifactPath),
+    });
+    return;
+  }
+
   const input = artifactInput(args);
   if (!input) throw new Error("stop requires an artifact path.");
   const resolved = await resolveCliArtifact(input, flagValue(args, "--root"));

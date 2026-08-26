@@ -20,7 +20,7 @@ The Bun CLI is the agent-facing adapter. It keeps the server/session details pat
 # Start or resume the local review session without opening another browser.
 bun run cli -- plan.html --no-open
 
-# Attach several artifacts to one project dropdown.
+# Attach several artifacts to one project dropdown and one shared local port.
 bun run cli -- plan.html architecture.html rollout.html
 
 # Keep this command attached to the active agent turn.
@@ -36,7 +36,15 @@ bun run cli -- complete plan.html \
 
 Each attached artifact keeps its own queue, history, revision, and locally
 saved comment drafts. Selecting a different artifact in the toolbar switches
-to that artifact's local session.
+to that artifact's local session without starting another daemon or port. A
+later `hone another.html` invocation also joins the existing daemon when the
+artifact uses the same `--root`.
+
+Hone does not create or relocate HTML artifacts; it reviews the exact path it
+is given. Codex-generated HTML artifacts without an explicit destination should
+be saved in `/Users/nikkolassanchez/Dev/html-artifacts`. If an artifact is made
+in Documents Playground, it came from the creation/export workflow rather than
+Hone and must be moved or regenerated in the artifact directory before review.
 
 ## Agent code reviews
 
@@ -87,13 +95,16 @@ bun run cli -- recent --limit 10
 bun run cli -- status
 bun run cli -- end plan.html
 bun run cli -- stop plan.html
+bun run cli -- stop --all
 ```
+
+`stop --all` stops every tracked Hone daemon in the selected state directory.
 
 `recent` reads the durable session history without starting a server. It prints
 one `YYYY-MM-DD  artifact-path` line per known, still-existing artifact,
 newest-first, so stopped review sessions remain discoverable at a glance.
 
-The CLI uses a single healthy daemon per artifact/state directory, cleans up on `stop` or process signals, and recovers stale runtime records. Idle shutdown defaults to 30 minutes and can be disabled with `--idle-timeout-ms 0`.
+The CLI uses a single healthy daemon per artifact root/state directory, cleans up on `stop` or process signals, and recovers stale runtime records. Idle shutdown defaults to 30 minutes and can be disabled with `--idle-timeout-ms 0`.
 
 Useful options:
 

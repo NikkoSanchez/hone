@@ -4,7 +4,6 @@ import { basename, dirname, join, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { SessionStore } from "./session-store";
 import type { AgentReply, AgentStatus, CodeReviewFinding, CodeReviewInput, FeedbackInput, FeedbackPollResult, SessionEndBy } from "./types";
-import { listRuntimes } from "./runtime";
 import {
   contentTypeFor,
   isLocalRequest,
@@ -187,6 +186,7 @@ function normalizeReview(payload: Record<string, unknown>): CodeReviewInput {
 function sessionPayload(store: SessionStore) {
   return {
     ...store.getSnapshot(),
+    rootPath: store.rootPath,
     artifactUrl: `/api/session/${store.id}/artifact/`,
     eventsUrl: `/api/session/${store.id}/events`,
     feedbackUrl: `/api/session/${store.id}/feedback`,
@@ -209,6 +209,9 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
     rootPath: artifact.rootPath,
     stateDir: config.stateDir,
   });
+  const stores = new Map<string, SessionStore>([[store.id, store]]);
+  const artifacts = new Map<string, typeof artifact>([[store.id, artifact]]);
+  let primaryStore = store;
 
   const clientRoot = join(dirname(fileURLToPath(import.meta.url)), "client");
   const indexHtml = await readFile(join(clientRoot, "index.html"), "utf8");
@@ -223,8 +226,6 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
   }
   const clientJavascript = await clientBuild.outputs[0].text();
   const clientStyles = await readFile(join(clientRoot, "styles.css"), "utf8");
-  const sessionPrefix = `/api/session/${store.id}`;
-
   let activeConnections = 0;
   let lastActivity = Date.now();
   let shuttingDown = false;
@@ -236,7 +237,7 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
   const openConnection = () => { activeConnections += 1; touch(); };
   const closeConnection = () => { activeConnections = Math.max(0, activeConnections - 1); touch(); };
 
-  function sseResponse(request: Request): Response {
+  function sseResponse(request: Request, activeStore: SessionStore): Response {
     let closeStream: (() => void) | undefined;
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -251,7 +252,7 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
             closeStream?.();
           }
         };
-        const unsubscribe = store.subscribe(send);
+        const unsubscribe = activeStore.subscribe(send);
         const heartbeat = setInterval(() => {
           if (!closed) controller.enqueue(encoder.encode(": keep-alive\n\n"));
         }, 15_000);
@@ -269,7 +270,7 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
         };
         closeStream = close;
         request.signal.addEventListener("abort", close, { once: true });
-        send({ type: "snapshot", snapshot: store.getSnapshot() });
+        send({ type: "snapshot", snapshot: activeStore.getSnapshot() });
       },
       cancel() {
         closeStream?.();
@@ -291,38 +292,65 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
 
     const url = new URL(request.url);
     const pathname = url.pathname;
+    const requestedSessionId = url.searchParams.get("artifact") ?? primaryStore.id;
+    const requestedStore = stores.get(requestedSessionId);
 
     if (request.method === "GET" && pathname === "/health") {
-      return json({ ok: true, sessionId: store.id, revision: store.snapshot.artifactRevision, ended: Boolean(store.snapshot.endedAt) });
+      return json({ ok: true, sessionId: primaryStore.id, revision: primaryStore.snapshot.artifactRevision, ended: Boolean(primaryStore.snapshot.endedAt) });
     }
 
     if (request.method === "GET" && pathname === "/") return text(indexHtml, "text/html; charset=utf-8");
     if (request.method === "GET" && pathname === "/client/styles.css") return text(clientStyles, "text/css; charset=utf-8");
     if (request.method === "GET" && pathname === "/client/app.ts") return text(clientJavascript, "text/javascript; charset=utf-8");
-    if (request.method === "GET" && pathname === "/api/session") return json(sessionPayload(store));
-    if (request.method === "GET" && pathname === "/api/artifacts") {
-      const runtimes = await listRuntimes(config.stateDir);
-      const artifacts = runtimes
-        .filter((runtime) => runtime.artifactPath.startsWith(`${store.rootPath}/`) || runtime.artifactPath === store.filePath)
-        .map((runtime) => ({
-          id: runtime.sessionId,
-          name: basename(runtime.artifactPath),
-          filePath: runtime.artifactPath,
-          url: `http://127.0.0.1:${runtime.port}`,
-          active: runtime.sessionId === store.id,
-          revision: runtime.session?.artifactRevision ?? 1,
-          hasReview: Boolean(runtime.session?.review),
-        }));
-      return json({ artifacts });
+    if (request.method === "GET" && pathname === "/api/session") {
+      return requestedStore ? json(sessionPayload(requestedStore)) : notFound("Unknown artifact session.");
     }
-    if (pathname === "/api/session" || !pathname.startsWith(sessionPrefix)) return notFound();
+    if (request.method === "GET" && pathname === "/api/artifacts") {
+      return json({ artifacts: [...stores.values()].map((item) => ({
+        id: item.id,
+        name: basename(item.filePath),
+        filePath: item.filePath,
+        url: `/?artifact=${encodeURIComponent(item.id)}`,
+        active: item.id === requestedSessionId,
+        revision: item.snapshot.artifactRevision,
+        hasReview: Boolean(item.snapshot.review),
+      })) });
+    }
+    if (request.method === "POST" && pathname === "/api/artifacts") {
+      const payload = await parseJson(request);
+      if (!payload || typeof payload.artifactPath !== "string") return badRequest("artifactPath is required.");
+      try {
+        const attachedArtifact = await resolveArtifactPath(payload.artifactPath, artifact.rootPath);
+        const attachedId = sessionIdForPath(attachedArtifact.filePath);
+        let attachedStore = stores.get(attachedId);
+        if (!attachedStore) {
+          attachedStore = await SessionStore.open({
+            id: attachedId,
+            filePath: attachedArtifact.filePath,
+            rootPath: attachedArtifact.rootPath,
+            stateDir: config.stateDir,
+          });
+          stores.set(attachedId, attachedStore);
+          artifacts.set(attachedId, attachedArtifact);
+        }
+        return json({ session: sessionPayload(attachedStore) }, 201);
+      } catch (error) {
+        return badRequest(error instanceof Error ? error.message : "Could not attach artifact.");
+      }
+    }
+
+    const sessionMatch = pathname.match(/^\/api\/session\/([^/]+)/);
+    const activeStore = sessionMatch ? stores.get(sessionMatch[1]!) : undefined;
+    const activeArtifact = sessionMatch ? artifacts.get(sessionMatch[1]!) : undefined;
+    if (!activeStore || !activeArtifact) return notFound();
+    const sessionPrefix = `/api/session/${activeStore.id}`;
 
     const artifactPrefix = `${sessionPrefix}/artifact`;
     if (request.method === "GET" && (pathname === artifactPrefix || pathname.startsWith(`${artifactPrefix}/`))) {
       const relativeAsset = pathname.slice(artifactPrefix.length).replace(/^\/+/, "");
       const artifactPath = relativeAsset
-        ? await resolveSafeFile(artifact.rootPath, relativeAsset)
-        : artifact.filePath;
+        ? await resolveSafeFile(activeArtifact.rootPath, relativeAsset)
+        : activeArtifact.filePath;
       if (!artifactPath) return notFound("Artifact asset is outside the allowed root or does not exist.");
       return new Response(Bun.file(artifactPath), {
         headers: {
@@ -332,15 +360,15 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
       });
     }
 
-    if (request.method === "GET" && pathname === sessionPrefix) return json(store.getSnapshot());
-    if (request.method === "GET" && pathname === `${sessionPrefix}/events`) return sseResponse(request);
+    if (request.method === "GET" && pathname === sessionPrefix) return json(sessionPayload(activeStore));
+    if (request.method === "GET" && pathname === `${sessionPrefix}/events`) return sseResponse(request, activeStore);
 
     if (request.method === "GET" && pathname === `${sessionPrefix}/feedback/next`) {
       const requestedTimeout = Number(url.searchParams.get("timeout") ?? 25_000);
       const timeoutMs = Math.min(30_000, Math.max(1_000, Number.isFinite(requestedTimeout) ? requestedTimeout : 25_000));
       openConnection();
       try {
-        const result = await store.waitForFeedback(timeoutMs, request.signal);
+        const result = await activeStore.waitForFeedback(timeoutMs, request.signal);
         return result ? json(result) : new Response(null, { status: 204 });
       } catch (error) {
         if (request.signal.aborted) return new Response(null, { status: 499 });
@@ -351,12 +379,12 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
     }
 
     if (request.method === "POST" && pathname === `${sessionPrefix}/feedback`) {
-      if (store.snapshot.endedAt) return json({ error: "Session has ended; reopen it before sending feedback." }, 409);
+      if (activeStore.snapshot.endedAt) return json({ error: "Session has ended; reopen it before sending feedback." }, 409);
       const payload = await parseJson(request);
       if (!payload) return badRequest("Expected a JSON feedback payload.");
       try {
-        const items = await store.enqueue(normalizeFeedbackList(payload));
-        return json({ queued: items, snapshot: store.getSnapshot() }, 201);
+        const items = await activeStore.enqueue(normalizeFeedbackList(payload));
+        return json({ queued: items, snapshot: activeStore.getSnapshot() }, 201);
       } catch (error) {
         return badRequest(error instanceof Error ? error.message : "Invalid feedback payload.");
       }
@@ -366,8 +394,8 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
       const payload = await parseJson(request);
       if (!payload || typeof payload.batchId !== "string") return badRequest("batchId is required.");
       try {
-        await store.acknowledge(payload.batchId);
-        return json({ ok: true, snapshot: store.getSnapshot() });
+        await activeStore.acknowledge(payload.batchId);
+        return json({ ok: true, snapshot: activeStore.getSnapshot() });
       } catch (error) {
         return json({ error: error instanceof Error ? error.message : "Unknown delivery batch." }, 409);
       }
@@ -377,8 +405,8 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
       const payload = await parseJson(request);
       if (!payload || typeof payload.batchId !== "string") return badRequest("batchId is required.");
       try {
-        const message = await store.complete(payload.batchId, normalizeReply(payload));
-        return json({ message, snapshot: store.getSnapshot() });
+        const message = await activeStore.complete(payload.batchId, normalizeReply(payload));
+        return json({ message, snapshot: activeStore.getSnapshot() });
       } catch (error) {
         return json({ error: error instanceof Error ? error.message : "Unknown delivery batch." }, 409);
       }
@@ -388,8 +416,8 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
       const payload = await parseJson(request);
       if (!payload) return badRequest("Expected a JSON reply payload.");
       try {
-        const message = await store.recordReply(normalizeReply(payload));
-        return json({ message, snapshot: store.getSnapshot() });
+        const message = await activeStore.recordReply(normalizeReply(payload));
+        return json({ message, snapshot: activeStore.getSnapshot() });
       } catch (error) {
         return badRequest(error instanceof Error ? error.message : "Invalid agent reply.");
       }
@@ -399,8 +427,8 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
       const payload = await parseJson(request);
       if (!payload) return badRequest("Expected a JSON review payload.");
       try {
-        const review = await store.setReview(normalizeReview(payload));
-        return json({ review, snapshot: store.getSnapshot() }, 201);
+        const review = await activeStore.setReview(normalizeReview(payload));
+        return json({ review, snapshot: activeStore.getSnapshot() }, 201);
       } catch (error) {
         return badRequest(error instanceof Error ? error.message : "Invalid review payload.");
       }
@@ -410,21 +438,30 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
       const payload = await parseJson(request);
       const status = payload?.status;
       if (status !== "listening" && status !== "working" && status !== "offline") return badRequest("status must be listening, working, or offline.");
-      await store.setAgentStatus(status as AgentStatus);
-      return json({ ok: true, snapshot: store.getSnapshot() });
+      await activeStore.setAgentStatus(status as AgentStatus);
+      return json({ ok: true, snapshot: activeStore.getSnapshot() });
     }
 
     if (request.method === "POST" && pathname === `${sessionPrefix}/end`) {
       const payload = await parseJson(request);
       const by = payload?.by;
       if (by !== undefined && by !== "agent" && by !== "user") return badRequest("by must be agent or user.");
-      await store.end((by as SessionEndBy | undefined) ?? "agent");
-      return json({ ok: true, snapshot: store.getSnapshot() });
+      await activeStore.end((by as SessionEndBy | undefined) ?? "agent");
+      return json({ ok: true, snapshot: activeStore.getSnapshot() });
     }
 
     if (request.method === "POST" && pathname === `${sessionPrefix}/reopen`) {
-      await store.reopen();
-      return json({ ok: true, snapshot: store.getSnapshot() });
+      await activeStore.reopen();
+      return json({ ok: true, snapshot: activeStore.getSnapshot() });
+    }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/detach`) {
+      if (stores.size === 1) return json({ error: "The last artifact cannot be detached while this daemon is running." }, 409);
+      activeStore.close();
+      stores.delete(activeStore.id);
+      artifacts.delete(activeStore.id);
+      if (activeStore.id === primaryStore.id) primaryStore = stores.values().next().value!;
+      return json({ ok: true });
     }
 
     return notFound();
@@ -435,7 +472,7 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
     shuttingDown = true;
     clearInterval(watcherTimer);
     clearInterval(idleTimer);
-    store.close();
+    for (const item of stores.values()) item.close();
     await server.stop(true);
   };
 
@@ -446,7 +483,9 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
   });
 
   watcherTimer = setInterval(() => {
-    void store.refreshArtifact().catch((error) => console.error("Artifact watcher error:", error));
+    for (const item of stores.values()) {
+      void item.refreshArtifact().catch((error) => console.error("Artifact watcher error:", error));
+    }
   }, 1_000);
 
   idleTimer = setInterval(() => {

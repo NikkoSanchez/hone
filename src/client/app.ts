@@ -91,6 +91,11 @@ const artifactSelect = $("#artifactSelect") as HTMLSelectElement;
 const reviewStage = $("#reviewStage") as HTMLDivElement;
 const diffList = $("#diffList") as HTMLDivElement;
 const reviewList = $("#reviewList") as HTMLDivElement;
+const appShell = $("#appShell") as HTMLDivElement;
+const railResizer = $("#railResizer") as HTMLDivElement;
+
+const sidebarStorageKey = "hone:sidebar-collapsed";
+const railWidthStorageKey = "hone:conversation-width";
 
 let session: SessionSnapshot;
 let localQueue: FeedbackItem[] = [];
@@ -100,6 +105,68 @@ let mode: "annotate" | "explore" = "annotate";
 let toastTimer: number | undefined;
 let ignoreNextArtifactClick = false;
 let hoveredArtifactElement: Element | null = null;
+
+function setSidebarCollapsed(collapsed: boolean): void {
+  appShell.classList.toggle("sidebar-collapsed", collapsed);
+  const toggle = $("#toggleSidebar") as HTMLButtonElement;
+  toggle.setAttribute("aria-expanded", String(!collapsed));
+  toggle.setAttribute("aria-label", collapsed ? "Expand navigation" : "Collapse navigation");
+  toggle.title = collapsed ? "Expand navigation" : "Collapse navigation";
+  localStorage.setItem(sidebarStorageKey, String(collapsed));
+}
+
+function maximumRailWidth(): number {
+  return Math.max(280, Math.min(720, window.innerWidth - (appShell.classList.contains("sidebar-collapsed") ? 58 : 208) - 360));
+}
+
+function setRailWidth(width: number, persist = true): void {
+  const nextWidth = Math.max(280, Math.min(maximumRailWidth(), Math.round(width)));
+  appShell.style.setProperty("--rail-width", `${nextWidth}px`);
+  railResizer.setAttribute("aria-valuenow", String(nextWidth));
+  railResizer.setAttribute("aria-valuemax", String(maximumRailWidth()));
+  if (persist) localStorage.setItem(railWidthStorageKey, String(nextWidth));
+}
+
+function installLayoutControls(): void {
+  setSidebarCollapsed(localStorage.getItem(sidebarStorageKey) === "true");
+  const storedWidth = Number(localStorage.getItem(railWidthStorageKey));
+  if (Number.isFinite(storedWidth) && storedWidth > 0) setRailWidth(storedWidth, false);
+
+  $("#toggleSidebar")!.addEventListener("click", () => {
+    setSidebarCollapsed(!appShell.classList.contains("sidebar-collapsed"));
+    const width = Number(localStorage.getItem(railWidthStorageKey));
+    if (Number.isFinite(width) && width > 0) setRailWidth(width, false);
+  });
+
+  railResizer.addEventListener("pointerdown", (event) => {
+    if (window.innerWidth <= 860) return;
+    railResizer.setPointerCapture(event.pointerId);
+    appShell.classList.add("is-resizing");
+    const resize = (moveEvent: PointerEvent) => setRailWidth(window.innerWidth - moveEvent.clientX, false);
+    const finish = () => {
+      railResizer.removeEventListener("pointermove", resize);
+      appShell.classList.remove("is-resizing");
+      const width = Number.parseInt(getComputedStyle(appShell).getPropertyValue("--rail-width"), 10);
+      if (Number.isFinite(width)) localStorage.setItem(railWidthStorageKey, String(width));
+    };
+    railResizer.addEventListener("pointermove", resize);
+    railResizer.addEventListener("pointerup", finish, { once: true });
+    railResizer.addEventListener("pointercancel", finish, { once: true });
+  });
+
+  railResizer.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const current = Number.parseInt(getComputedStyle(appShell).getPropertyValue("--rail-width"), 10) || 360;
+    const delta = (event.shiftKey ? 40 : 10) * (event.key === "ArrowLeft" ? 1 : -1);
+    setRailWidth(current + delta);
+  });
+
+  window.addEventListener("resize", () => {
+    const current = Number.parseInt(getComputedStyle(appShell).getPropertyValue("--rail-width"), 10);
+    if (Number.isFinite(current) && window.innerWidth > 860) setRailWidth(current, false);
+  });
+}
 
 function draftStorageKey(): string {
   return `hone:drafts:${session.id}`;
@@ -380,7 +447,7 @@ function renderArtifactSections(documentRef: Document): void {
     .slice(0, 16);
 
   sectionList.innerHTML = sections.length
-    ? sections.map(({ anchor, label }, index) => `<button type="button" data-anchor="${escapeHtml(anchor)}">${String(index + 1).padStart(2, "0")} <span>${escapeHtml(label)}</span></button>`).join("")
+    ? sections.map(({ anchor, label }, index) => `<button type="button" data-anchor="${escapeHtml(anchor)}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">${String(index + 1).padStart(2, "0")} <span>${escapeHtml(label)}</span></button>`).join("")
     : `<span class="section-list-empty">No artifact anchors found</span>`;
 }
 
@@ -547,7 +614,8 @@ function updateFromEvent(event: { type: string; snapshot: SessionSnapshot }): vo
 }
 
 async function loadArtifacts(): Promise<void> {
-  const response = await fetch("/api/artifacts");
+  const activeArtifact = new URLSearchParams(location.search).get("artifact");
+  const response = await fetch(`/api/artifacts${activeArtifact ? `?artifact=${encodeURIComponent(activeArtifact)}` : ""}`);
   if (!response.ok) return;
   const payload = await response.json() as { artifacts: ArtifactOption[] };
   const artifacts = payload.artifacts.length
@@ -581,7 +649,9 @@ function locateFinding(index: number): void {
 }
 
 async function boot(): Promise<void> {
-  const response = await fetch("/api/session");
+  installLayoutControls();
+  const activeArtifact = new URLSearchParams(location.search).get("artifact");
+  const response = await fetch(`/api/session${activeArtifact ? `?artifact=${encodeURIComponent(activeArtifact)}` : ""}`);
   if (!response.ok) throw new Error(`Session bootstrap failed: ${response.status}`);
   session = await response.json() as SessionSnapshot;
   loadDrafts();
@@ -614,6 +684,12 @@ async function boot(): Promise<void> {
   artifactSelect.addEventListener("change", () => {
     saveDrafts();
     if (artifactSelect.value && artifactSelect.value !== location.origin) location.href = artifactSelect.value;
+  });
+  $("#copyArtifact")!.addEventListener("click", () => {
+    void navigator.clipboard.writeText(session.filePath).then(
+      () => showToast("Artifact path copied."),
+      () => showToast("Could not access the clipboard."),
+    );
   });
 
   $$<HTMLButtonElement>("[data-surface]").forEach((button) => button.addEventListener("click", () => setSurface(button.dataset.surface as "artifact" | "review")));

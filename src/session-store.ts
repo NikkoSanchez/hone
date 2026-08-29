@@ -3,6 +3,8 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   AgentReply,
+  AgentConfiguration,
+  AgentExit,
   AgentStatus,
   DeliveryState,
   FeedbackEnvelope,
@@ -62,6 +64,7 @@ export class SessionStore {
   private readonly waiters = new Set<FeedbackWaiter>();
   private pollOfflineTimer: ReturnType<typeof setTimeout> | undefined;
   private writeChain: Promise<void> = Promise.resolve();
+  private closed = false;
 
   private constructor(options: SessionStoreOptions, state: StoredSessionState) {
     this.id = options.id;
@@ -97,6 +100,7 @@ export class SessionStore {
       ...(existing?.endedAt ? { endedAt: existing.endedAt } : {}),
       ...(existing?.endedBy ? { endedBy: existing.endedBy } : {}),
       ...(existing?.review ? { review: existing.review } : {}),
+      ...(existing?.agent ? { agent: existing.agent } : {}),
     };
 
     const store = new SessionStore(options, state);
@@ -118,6 +122,7 @@ export class SessionStore {
       agentStatus: this.state.agentStatus,
       updatedAt: this.state.updatedAt,
       deliveryBatchId: this.state.delivery?.batchId ?? null,
+      deliveryStatus: this.state.delivery?.status ?? (this.state.delivery ? "queued" : null),
       ...(this.state.endedAt ? { endedAt: this.state.endedAt } : {}),
       ...(this.state.endedBy ? { endedBy: this.state.endedBy } : {}),
       ...(this.state.review ? { review: clone(this.state.review) } : {}),
@@ -176,6 +181,55 @@ export class SessionStore {
     this.publish("queue");
     this.resolveWaiters();
     return queuedItems;
+  }
+
+  async claimFeedback(): Promise<FeedbackEnvelope | null> {
+    if (this.state.endedAt || (!this.state.delivery && this.state.queue.length === 0)) return null;
+    return this.createDelivery();
+  }
+
+  async markDeliverySubmitted(batchId: string): Promise<void> {
+    const delivery = this.requireDelivery(batchId);
+    delivery.status = "submitted";
+    delivery.submittedAt = now();
+    this.state.agentStatus = "working";
+    await this.persist();
+    this.publish("queue");
+    this.publish("presence");
+  }
+
+  async markDeliveryWorking(batchId: string): Promise<void> {
+    const delivery = this.requireDelivery(batchId);
+    if (delivery.status === "working") return;
+    delivery.status = "working";
+    delivery.lastActivityAt = now();
+    this.state.agentStatus = "working";
+    await this.persist();
+    this.publish("queue");
+    this.publish("presence");
+  }
+
+  async configureAgent(configuration: AgentConfiguration): Promise<void> {
+    this.state.agent = {
+      configuration: clone(configuration),
+      transcriptTail: this.state.agent?.transcriptTail ?? "",
+      ...(this.state.agent?.lastExit ? { lastExit: clone(this.state.agent.lastExit) } : {}),
+    };
+    await this.persist();
+  }
+
+  async persistAgentTranscript(transcriptTail: string, lastExit?: AgentExit): Promise<void> {
+    const configuration = this.state.agent?.configuration ?? { enabled: false };
+    this.state.agent = {
+      configuration: clone(configuration),
+      transcriptTail,
+      ...(lastExit ? { lastExit: clone(lastExit) } : this.state.agent?.lastExit ? { lastExit: clone(this.state.agent.lastExit) } : {}),
+    };
+    await this.persist();
+  }
+
+  get persistedAgent() {
+    return this.state.agent ? clone(this.state.agent) : undefined;
   }
 
   async waitForFeedback(timeoutMs: number, signal?: AbortSignal): Promise<FeedbackPollResult | null> {
@@ -277,6 +331,7 @@ export class SessionStore {
   }
 
   close(): void {
+    this.closed = true;
     this.cancelPollOffline();
     const error = new Error("Hone session store closed");
     for (const waiter of [...this.waiters]) {
@@ -311,6 +366,7 @@ export class SessionStore {
       batchId: envelope.batchId,
       envelope,
       deliveredAt: now(),
+      status: "queued",
     };
     this.state.delivery = delivery;
     this.state.agentStatus = "working";
@@ -386,6 +442,13 @@ export class SessionStore {
     return deliveredItems;
   }
 
+  private requireDelivery(batchId: string): DeliveryState {
+    if (!this.state.delivery || this.state.delivery.batchId !== batchId) {
+      throw new Error(`Unknown delivery batch: ${batchId}`);
+    }
+    return this.state.delivery;
+  }
+
   private endedEnvelope(): Extract<FeedbackPollResult, { status: "ended" }> {
     if (!this.state.endedAt || !this.state.endedBy) throw new Error("Ended session is missing end metadata.");
     return {
@@ -408,9 +471,10 @@ export class SessionStore {
   }
 
   private async persist(): Promise<void> {
+    if (this.closed) return;
     this.state.updatedAt = now();
     const serialized = JSON.stringify(this.state, null, 2);
-    this.writeChain = this.writeChain.then(() => Bun.write(this.stateFilePath, serialized).then(() => undefined));
+    this.writeChain = this.writeChain.then(() => this.closed ? undefined : Bun.write(this.stateFilePath, serialized).then(() => undefined));
     await this.writeChain;
   }
 }

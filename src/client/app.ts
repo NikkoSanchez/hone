@@ -1,4 +1,6 @@
 import { FileDiff, parsePatchFiles } from "@pierre/diffs";
+import type { AgentRuntimeSnapshot } from "../types";
+import { AgentTerminalClient } from "../terminal-bridge/client/terminal-client";
 
 type AgentStatus = "listening" | "working" | "offline";
 
@@ -69,6 +71,15 @@ interface SessionSnapshot {
   feedbackUrl: string;
   statusUrl: string;
   reviewUrl: string;
+  agentSendUrl: string;
+  agentStartUrl: string;
+  agentStopUrl: string;
+  agentRestartUrl: string;
+  agentConfigureUrl: string;
+  agentTerminalUrl: string;
+  managedAgentEnabled: boolean;
+  availableAgentAdapters: Array<{ id: string; label: string }>;
+  agent?: AgentRuntimeSnapshot;
   review?: CodeReview;
 }
 
@@ -105,6 +116,7 @@ let mode: "annotate" | "explore" = "annotate";
 let toastTimer: number | undefined;
 let ignoreNextArtifactClick = false;
 let hoveredArtifactElement: Element | null = null;
+let terminalClient: AgentTerminalClient | undefined;
 
 function setSidebarCollapsed(collapsed: boolean): void {
   appShell.classList.toggle("sidebar-collapsed", collapsed);
@@ -217,8 +229,8 @@ function setStatusVisual(status: AgentStatus): void {
   $("#sidebarStatusDetail")!.textContent = status === "working"
     ? "The agent is processing the latest envelope."
     : status === "offline"
-      ? "Feedback stays queued until an agent starts polling."
-      : "The agent can wait on the next long poll.";
+      ? session?.agent?.adapterId ? "Feedback stays queued until the managed agent restarts." : "Feedback stays durable until an agent connects."
+      : session?.agent?.adapterId ? "The managed terminal is ready for feedback." : "A compatibility agent can receive the next batch.";
   for (const dot of [$("#topStatusDot"), $("#sidebarStatusDot"), $("#railStatusDot")]) {
     dot?.classList.toggle("is-working", status === "working");
     dot?.classList.toggle("is-offline", status === "offline");
@@ -339,6 +351,29 @@ function reviewMarkdown(): string {
   return [`## Agent code review`, review.summary ?? "", ...sections].filter(Boolean).join("\n\n");
 }
 
+function renderAgent(): void {
+  const agent = session.agent;
+  const adapterSelect = $("#agentAdapter") as HTMLSelectElement;
+  const chooser = $("#agentChooser") as HTMLDivElement;
+  const actions = $("#agentActions") as HTMLDivElement;
+  if (adapterSelect.options.length === 0) {
+    adapterSelect.innerHTML = session.availableAgentAdapters.length
+      ? session.availableAgentAdapters.map((adapter) => `<option value="${escapeHtml(adapter.id)}">${escapeHtml(adapter.label)}</option>`).join("")
+      : `<option value="">No supported CLI found</option>`;
+  }
+  chooser.hidden = !session.managedAgentEnabled || Boolean(agent?.adapterId);
+  actions.hidden = !session.managedAgentEnabled || !agent?.adapterId;
+  $("#agentName")!.textContent = !session.managedAgentEnabled ? "Managed agent disabled" : agent?.adapterLabel ?? "Choose an agent";
+  $("#agentCwd")!.textContent = agent?.cwd ?? session.filePath;
+  $("#terminalSequence")!.textContent = `seq ${agent?.sequence ?? 0}`;
+  $("#approvalCard")!.toggleAttribute("hidden", !agent?.requiresInput);
+  const startButton = $("#startAgent") as HTMLButtonElement;
+  const stopButton = $("#stopAgent") as HTMLButtonElement;
+  const running = Boolean(agent && !["offline", "error", "disabled"].includes(agent.status));
+  startButton.disabled = running;
+  stopButton.disabled = !running;
+}
+
 function render(): void {
   $("#sessionId")!.textContent = session.id;
   $("#revisionLabel")!.textContent = `rev ${session.artifactRevision}`;
@@ -346,6 +381,7 @@ function render(): void {
   setStatusVisual(session.agentStatus);
   renderQueue();
   renderHistory();
+  renderAgent();
   const hasReview = Boolean(session.review);
   $("#reviewSurfaceButton")!.toggleAttribute("hidden", !hasReview);
   $("#reviewTab")!.toggleAttribute("hidden", !hasReview);
@@ -553,16 +589,23 @@ async function queueComment(): Promise<void> {
 
 async function sendQueue(endSession = false): Promise<void> {
   if (localQueue.length === 0) return showToast("There are no local comments to send.");
-  const response = await fetch(session.feedbackUrl, {
+  if (session.managedAgentEnabled && !session.agent?.adapterId && session.availableAgentAdapters.length > 0) {
+    setView("agent");
+    return showToast("Choose the CLI Hone should launch before sending feedback.");
+  }
+  const managed = session.managedAgentEnabled && Boolean(session.agent?.adapterId);
+  const response = await fetch(managed ? session.agentSendUrl : session.feedbackUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ items: localQueue }),
   });
-  if (!response.ok) return showToast(`Could not send feedback (${response.status}).`);
+  const payload = await response.json().catch(() => ({})) as { error?: string; agent?: AgentRuntimeSnapshot };
+  if (!response.ok) return showToast(payload.error ?? `Could not send feedback (${response.status}).`);
+  if (payload.agent) session.agent = payload.agent;
   localQueue = [];
   saveDrafts();
   renderQueue();
-  showToast("Feedback sent. The agent can receive the batch on its next poll.");
+  showToast(managed ? "Feedback persisted and submitted to the managed terminal." : "Feedback persisted for the compatibility agent.");
   if (endSession) {
     await fetch(session.statusUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "offline" }) });
   }
@@ -592,11 +635,25 @@ function handleQueueAction(event: Event): void {
   }
 }
 
-function setView(view: "queue" | "history" | "review"): void {
+function setView(view: "queue" | "history" | "review" | "agent"): void {
   $("#queueView")!.toggleAttribute("hidden", view !== "queue");
   $("#historyView")!.toggleAttribute("hidden", view !== "history");
   $("#reviewView")!.toggleAttribute("hidden", view !== "review");
+  $("#agentView")!.toggleAttribute("hidden", view !== "agent");
   $$<HTMLButtonElement>("[data-view]").forEach((button) => button.classList.toggle("is-active", button.dataset.view === view));
+  if (view === "agent") window.setTimeout(() => { terminalClient?.fit(); terminalClient?.focus(); }, 0);
+}
+
+async function agentAction(url: string, body: object = {}): Promise<void> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({})) as { error?: string; agent?: AgentRuntimeSnapshot };
+  if (!response.ok) return showToast(payload.error ?? `Agent action failed (${response.status}).`);
+  if (payload.agent) session.agent = payload.agent;
+  renderAgent();
 }
 
 function updateFromEvent(event: { type: string; snapshot: SessionSnapshot }): void {
@@ -658,6 +715,19 @@ async function boot(): Promise<void> {
   render();
   await loadArtifacts();
 
+  terminalClient = new AgentTerminalClient({
+    container: $("#agentTerminal") as HTMLDivElement,
+    url: session.agentTerminalUrl,
+    onAgentChange(agent) {
+      session.agent = agent;
+      setStatusVisual(agent.status === "ready" ? "listening" : ["starting", "working", "stopping"].includes(agent.status) ? "working" : "offline");
+      renderAgent();
+    },
+    onConnectionChange(connected) {
+      $("#terminalConnection")!.textContent = connected ? "connected" : "reconnecting…";
+    },
+  });
+
   frame.addEventListener("load", installArtifactHooks);
   frame.src = `${session.artifactUrl}?revision=${session.artifactRevision}`;
 
@@ -694,7 +764,14 @@ async function boot(): Promise<void> {
 
   $$<HTMLButtonElement>("[data-surface]").forEach((button) => button.addEventListener("click", () => setSurface(button.dataset.surface as "artifact" | "review")));
 
-  $$<HTMLButtonElement>("[data-view]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view as "queue" | "history" | "review")));
+  $$<HTMLButtonElement>("[data-view]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view as "queue" | "history" | "review" | "agent")));
+  $("#configureAgent")!.addEventListener("click", () => {
+    const adapterId = ($("#agentAdapter") as HTMLSelectElement).value;
+    if (adapterId) void agentAction(session.agentConfigureUrl, { adapterId });
+  });
+  $("#startAgent")!.addEventListener("click", () => void agentAction(session.agentStartUrl));
+  $("#restartAgent")!.addEventListener("click", () => void agentAction(session.agentRestartUrl));
+  $("#stopAgent")!.addEventListener("click", () => void agentAction(session.agentStopUrl));
   reviewList.addEventListener("click", (event) => {
     const button = (event.target as Element).closest<HTMLButtonElement>("button[data-finding-action]");
     if (!button) return;

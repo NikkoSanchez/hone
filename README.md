@@ -12,9 +12,40 @@ Then open <http://127.0.0.1:8765>.
 
 `examples/review-plan.html` is a small, self-contained reference artifact rather than a visual template. It demonstrates labeled section anchors, granular nested targets, text selection, and an Explore-mode control without duplicating Hone's navigation.
 
-## CLI agent loop
+## Managed agent terminal
 
-The Bun CLI is the agent-facing adapter. It keeps the server/session details path-based so an agent does not need to discover IDs or construct HTTP requests by hand:
+Hone can launch an existing agent CLI in a Bun-owned PTY and keep the full
+terminal beside the artifact. Feedback is persisted first, formatted as one
+anchored envelope, and written directly to the selected CLI. Terminal output,
+resize, keyboard input, restart, and browser reconnection stay on the local
+Hone origin.
+
+```sh
+# Launch a specific supported CLI with the review.
+hone plan.html --agent codex
+hone plan.html --agent claude
+hone plan.html --agent opencode
+
+# Keep the original external polling workflow instead.
+hone plan.html --no-agent
+```
+
+When exactly one supported CLI is installed, Hone selects it automatically.
+When several are available, the Agent tab presents a chooser. The selected
+adapter is remembered with the session. Hone passes an argument array directly
+to `Bun.spawn`; it does not compose a shell command or take over the harness's
+authentication, model, tools, permissions, history, or compaction.
+
+The managed delivery state and bounded transcript tail are durable. If the CLI
+exits after submission, the same batch ID remains available for restart rather
+than being silently acknowledged. Closing a browser tab does not spawn or kill
+another CLI; ending or stopping the Hone session terminates its owned process.
+
+## Compatibility CLI agent loop
+
+The polling CLI remains available for external agents, tests, and migration. It
+keeps server/session details path-based so an agent does not need to discover
+IDs or construct HTTP requests by hand:
 
 ```sh
 # Start or resume the local review session without opening another browser.
@@ -148,8 +179,24 @@ The browser receives artifact reload, presence, queue, and history events over S
 
 `src/agent-client.ts` contains the TypeScript client behind the CLI poll → process → complete loop. The server also keeps the older individual acknowledgement and reply endpoints for protocol compatibility.
 
+## Terminal bridge boundaries
+
+The internal `src/terminal-bridge` modules separate protocol frames, Bun PTY
+supervision, browser xterm binding, and CLI adapters. Artifact ownership,
+feedback persistence, and review history remain in Hone core. This is an
+internal extraction seam, not a public package.
+
+Managed terminal routes are scoped to one local artifact session:
+
+- `POST /api/session/:id/agent/start|restart|stop`
+- `POST /api/session/:id/agent/configure`
+- `POST /api/session/:id/agent/send`
+- `POST /api/session/:id/agent/input|resize`
+- `WS /api/session/:id/agent/terminal`
+
 ## First pass boundaries
 
 - Plain TypeScript and DOM modules are intentional; React is deferred.
-- Agent handoff uses the CLI over long polling. Browser reload and presence use SSE.
-- Layout diagnostics, WebSockets, whiteboards, and artifact authoring are later slices.
+- Managed agent handoff uses Bun.Terminal and a binary WebSocket; compatibility
+  agents can still use long polling. Browser reload and review presence use SSE.
+- Layout diagnostics, whiteboards, and artifact authoring are later slices.

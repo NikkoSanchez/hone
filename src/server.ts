@@ -4,6 +4,9 @@ import { basename, dirname, join, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { SessionStore } from "./session-store";
 import type { AgentReply, AgentStatus, CodeReviewFinding, CodeReviewInput, FeedbackInput, FeedbackPollResult, SessionEndBy } from "./types";
+import { availableTerminalAgentAdapters, getTerminalAgentAdapter, selectTerminalAgentAdapter, terminalAgentAdapterIds } from "./terminal-bridge/adapters";
+import { parseTerminalClientMessage } from "./terminal-bridge/protocol";
+import { TerminalSupervisor, type AgentSocketData } from "./terminal-bridge/server/supervisor";
 import {
   contentTypeFor,
   isLocalRequest,
@@ -21,13 +24,15 @@ export interface HoneServerConfig {
   stateDir: string;
   port: number;
   idleTimeoutMs: number;
+  agentId?: string;
+  noAgent?: boolean;
   installSignalHandlers?: boolean;
 }
 
 export interface HoneServerRuntime {
   readonly artifact: Awaited<ReturnType<typeof resolveArtifactPath>>;
   readonly store: SessionStore;
-  readonly server: ReturnType<typeof Bun.serve>;
+  readonly server: Bun.Server<AgentSocketData>;
   readonly port: number;
   stop(): Promise<void>;
 }
@@ -66,7 +71,9 @@ export function parseServerConfig(args: string[] = Bun.argv.slice(2)): HoneServe
   const stateDir = resolve(argumentValue(argv, "--state-dir") ?? Bun.env.HONE_STATE_DIR ?? defaultStateDir());
   const port = Math.max(1, Math.min(65_535, Math.floor(parseNumber(argumentValue(argv, "--port") ?? Bun.env.HONE_PORT, DEFAULT_PORT))));
   const idleTimeoutMs = parseIdleTimeout(argumentValue(argv, "--idle-timeout-ms") ?? Bun.env.HONE_IDLE_TIMEOUT_MS);
-  return { artifactInput, configuredRoot, stateDir, port, idleTimeoutMs };
+  const agentId = argumentValue(argv, "--agent") ?? Bun.env.HONE_AGENT;
+  const noAgent = argv.includes("--no-agent") || Bun.env.HONE_NO_AGENT === "1";
+  return { artifactInput, configuredRoot, stateDir, port, idleTimeoutMs, ...(agentId ? { agentId } : {}), noAgent };
 }
 
 function json(value: unknown, status = 200): Response {
@@ -183,9 +190,10 @@ function normalizeReview(payload: Record<string, unknown>): CodeReviewInput {
   };
 }
 
-function sessionPayload(store: SessionStore) {
+function sessionPayload(store: SessionStore, supervisor?: TerminalSupervisor) {
   return {
     ...store.getSnapshot(),
+    ...(supervisor ? { agent: supervisor.snapshot } : {}),
     rootPath: store.rootPath,
     artifactUrl: `/api/session/${store.id}/artifact/`,
     eventsUrl: `/api/session/${store.id}/events`,
@@ -197,6 +205,16 @@ function sessionPayload(store: SessionStore) {
     statusUrl: `/api/session/${store.id}/status`,
     endUrl: `/api/session/${store.id}/end`,
     reviewUrl: `/api/session/${store.id}/review`,
+    agentStartUrl: `/api/session/${store.id}/agent/start`,
+    agentSendUrl: `/api/session/${store.id}/agent/send`,
+    agentInputUrl: `/api/session/${store.id}/agent/input`,
+    agentResizeUrl: `/api/session/${store.id}/agent/resize`,
+    agentStopUrl: `/api/session/${store.id}/agent/stop`,
+    agentRestartUrl: `/api/session/${store.id}/agent/restart`,
+    agentConfigureUrl: `/api/session/${store.id}/agent/configure`,
+    agentTerminalUrl: `/api/session/${store.id}/agent/terminal`,
+    availableAgentAdapters: availableTerminalAgentAdapters().map(({ id, label }) => ({ id, label })),
+    managedAgentEnabled: supervisor?.snapshot.status !== "disabled",
   };
 }
 
@@ -211,6 +229,18 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
   });
   const stores = new Map<string, SessionStore>([[store.id, store]]);
   const artifacts = new Map<string, typeof artifact>([[store.id, artifact]]);
+  const persistedAdapterId = store.persistedAgent?.configuration.adapterId;
+  const requestedAdapter = config.agentId
+    ? getTerminalAgentAdapter(config.agentId)
+    : persistedAdapterId
+      ? getTerminalAgentAdapter(persistedAdapterId)
+      : selectTerminalAgentAdapter();
+  if (config.agentId && !requestedAdapter) {
+    throw new Error(`Unknown agent adapter: ${config.agentId}. Choose one of: ${terminalAgentAdapterIds().join(", ")}.`);
+  }
+  const supervisor = new TerminalSupervisor({ store, adapter: requestedAdapter, enabled: !config.noAgent });
+  const supervisors = new Map<string, TerminalSupervisor>([[store.id, supervisor]]);
+  await supervisor.initialize(Boolean(requestedAdapter));
   let primaryStore = store;
 
   const clientRoot = join(dirname(fileURLToPath(import.meta.url)), "client");
@@ -221,15 +251,17 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
     format: "esm",
     minify: false,
   });
-  if (!clientBuild.success || !clientBuild.outputs[0]) {
+  const javascriptOutput = clientBuild.outputs.find((output) => output.path.endsWith(".js"));
+  if (!clientBuild.success || !javascriptOutput) {
     throw new Error(`Could not build Hone client: ${clientBuild.logs.map(String).join("\n")}`);
   }
-  const clientJavascript = await clientBuild.outputs[0].text();
-  const clientStyles = await readFile(join(clientRoot, "styles.css"), "utf8");
+  const clientJavascript = await javascriptOutput.text();
+  const xtermStyles = await readFile(join(clientRoot, "../../node_modules/@xterm/xterm/css/xterm.css"), "utf8");
+  const clientStyles = `${await readFile(join(clientRoot, "styles.css"), "utf8")}\n${xtermStyles}`;
   let activeConnections = 0;
   let lastActivity = Date.now();
   let shuttingDown = false;
-  let server: ReturnType<typeof Bun.serve>;
+  let server: Bun.Server<AgentSocketData>;
   let watcherTimer: ReturnType<typeof setInterval>;
   let idleTimer: ReturnType<typeof setInterval>;
 
@@ -286,7 +318,7 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
     });
   }
 
-  async function route(request: Request): Promise<Response> {
+  async function route(request: Request): Promise<Response | undefined> {
     touch();
     if (!isLocalRequest(request)) return text("Hone only accepts loopback requests.", "text/plain; charset=utf-8", 403);
 
@@ -303,7 +335,7 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
     if (request.method === "GET" && pathname === "/client/styles.css") return text(clientStyles, "text/css; charset=utf-8");
     if (request.method === "GET" && pathname === "/client/app.ts") return text(clientJavascript, "text/javascript; charset=utf-8");
     if (request.method === "GET" && pathname === "/api/session") {
-      return requestedStore ? json(sessionPayload(requestedStore)) : notFound("Unknown artifact session.");
+      return requestedStore ? json(sessionPayload(requestedStore, supervisors.get(requestedStore.id))) : notFound("Unknown artifact session.");
     }
     if (request.method === "GET" && pathname === "/api/artifacts") {
       return json({ artifacts: [...stores.values()].map((item) => ({
@@ -332,8 +364,17 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
           });
           stores.set(attachedId, attachedStore);
           artifacts.set(attachedId, attachedArtifact);
+          const attachedPersistedAdapter = attachedStore.persistedAgent?.configuration.adapterId;
+          const attachedAdapter = config.agentId
+            ? getTerminalAgentAdapter(config.agentId)
+            : attachedPersistedAdapter
+              ? getTerminalAgentAdapter(attachedPersistedAdapter)
+              : selectTerminalAgentAdapter();
+          const attachedSupervisor = new TerminalSupervisor({ store: attachedStore, adapter: attachedAdapter, enabled: !config.noAgent });
+          supervisors.set(attachedId, attachedSupervisor);
+          await attachedSupervisor.initialize(Boolean(attachedAdapter));
         }
-        return json({ session: sessionPayload(attachedStore) }, 201);
+        return json({ session: sessionPayload(attachedStore, supervisors.get(attachedId)) }, 201);
       } catch (error) {
         return badRequest(error instanceof Error ? error.message : "Could not attach artifact.");
       }
@@ -344,6 +385,7 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
     const activeArtifact = sessionMatch ? artifacts.get(sessionMatch[1]!) : undefined;
     if (!activeStore || !activeArtifact) return notFound();
     const sessionPrefix = `/api/session/${activeStore.id}`;
+    const activeSupervisor = supervisors.get(activeStore.id);
 
     const artifactPrefix = `${sessionPrefix}/artifact`;
     if (request.method === "GET" && (pathname === artifactPrefix || pathname.startsWith(`${artifactPrefix}/`))) {
@@ -360,8 +402,78 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
       });
     }
 
-    if (request.method === "GET" && pathname === sessionPrefix) return json(sessionPayload(activeStore));
-    if (request.method === "GET" && pathname === `${sessionPrefix}/events`) return sseResponse(request, activeStore);
+    if (request.method === "GET" && pathname === sessionPrefix) return json(sessionPayload(activeStore, activeSupervisor));
+    if (request.method === "GET" && pathname === `${sessionPrefix}/events`) {
+      server.timeout(request, 0);
+      return sseResponse(request, activeStore);
+    }
+
+    if (request.method === "GET" && pathname === `${sessionPrefix}/agent/terminal`) {
+      if (!activeSupervisor) return notFound("Managed agent is unavailable.");
+      return server.upgrade(request, { data: { sessionId: activeStore.id } }) ? undefined : badRequest("Could not upgrade the terminal connection.");
+    }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/agent/configure`) {
+      if (!activeSupervisor) return notFound("Managed agent is unavailable.");
+      const payload = await parseJson(request);
+      const adapter = typeof payload?.adapterId === "string" ? getTerminalAgentAdapter(payload.adapterId) : undefined;
+      if (!adapter) return badRequest(`adapterId must be one of: ${terminalAgentAdapterIds().join(", ")}.`);
+      try {
+        return json({ agent: await activeSupervisor.configure(adapter), snapshot: activeStore.getSnapshot() });
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : "Could not configure the agent." }, 409);
+      }
+    }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/agent/start`) {
+      if (!activeSupervisor) return notFound("Managed agent is unavailable.");
+      try { return json({ agent: await activeSupervisor.start() }); } catch (error) {
+        return json({ error: error instanceof Error ? error.message : "Could not start the agent." }, 409);
+      }
+    }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/agent/send`) {
+      if (!activeSupervisor) return notFound("Managed agent is unavailable.");
+      if (activeStore.snapshot.endedAt) return json({ error: "Session has ended; reopen it before sending feedback." }, 409);
+      const payload = await parseJson(request);
+      if (!payload) return badRequest("Expected a JSON feedback payload.");
+      try {
+        const items = await activeStore.enqueue(normalizeFeedbackList(payload));
+        const agent = await activeSupervisor.submitPending();
+        return json({ queued: items, snapshot: activeStore.getSnapshot(), agent }, 201);
+      } catch (error) {
+        return badRequest(error instanceof Error ? error.message : "Could not send feedback.");
+      }
+    }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/agent/input`) {
+      if (!activeSupervisor) return notFound("Managed agent is unavailable.");
+      const payload = await parseJson(request);
+      if (!payload || typeof payload.data !== "string" || payload.data.length > 64_000) return badRequest("data must be a terminal input string.");
+      try { activeSupervisor.writeInput(payload.data); return json({ agent: activeSupervisor.snapshot }); } catch (error) {
+        return json({ error: error instanceof Error ? error.message : "Could not write terminal input." }, 409);
+      }
+    }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/agent/resize`) {
+      if (!activeSupervisor) return notFound("Managed agent is unavailable.");
+      const payload = await parseJson(request);
+      if (!payload || typeof payload.cols !== "number" || typeof payload.rows !== "number") return badRequest("cols and rows are required.");
+      activeSupervisor.resize(payload.cols, payload.rows);
+      return json({ agent: activeSupervisor.snapshot });
+    }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/agent/stop`) {
+      if (!activeSupervisor) return notFound("Managed agent is unavailable.");
+      return json({ agent: await activeSupervisor.stop() });
+    }
+
+    if (request.method === "POST" && pathname === `${sessionPrefix}/agent/restart`) {
+      if (!activeSupervisor) return notFound("Managed agent is unavailable.");
+      try { return json({ agent: await activeSupervisor.restart() }); } catch (error) {
+        return json({ error: error instanceof Error ? error.message : "Could not restart the agent." }, 409);
+      }
+    }
 
     if (request.method === "GET" && pathname === `${sessionPrefix}/feedback/next`) {
       const requestedTimeout = Number(url.searchParams.get("timeout") ?? 25_000);
@@ -446,20 +558,24 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
       const payload = await parseJson(request);
       const by = payload?.by;
       if (by !== undefined && by !== "agent" && by !== "user") return badRequest("by must be agent or user.");
+      await activeSupervisor?.stop();
       await activeStore.end((by as SessionEndBy | undefined) ?? "agent");
       return json({ ok: true, snapshot: activeStore.getSnapshot() });
     }
 
     if (request.method === "POST" && pathname === `${sessionPrefix}/reopen`) {
       await activeStore.reopen();
+      if (activeSupervisor?.adapter && activeSupervisor.snapshot.status !== "disabled") await activeSupervisor.start();
       return json({ ok: true, snapshot: activeStore.getSnapshot() });
     }
 
     if (request.method === "POST" && pathname === `${sessionPrefix}/detach`) {
       if (stores.size === 1) return json({ error: "The last artifact cannot be detached while this daemon is running." }, 409);
+      await activeSupervisor?.dispose();
       activeStore.close();
       stores.delete(activeStore.id);
       artifacts.delete(activeStore.id);
+      supervisors.delete(activeStore.id);
       if (activeStore.id === primaryStore.id) primaryStore = stores.values().next().value!;
       return json({ ok: true });
     }
@@ -472,14 +588,37 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
     shuttingDown = true;
     clearInterval(watcherTimer);
     clearInterval(idleTimer);
+    await Promise.all([...supervisors.values()].map((item) => item.dispose()));
     for (const item of stores.values()) item.close();
     await server.stop(true);
   };
 
-  server = Bun.serve({
+  server = Bun.serve<AgentSocketData>({
     hostname: "127.0.0.1",
     port: config.port,
     fetch: route,
+    websocket: {
+      idleTimeout: 0,
+      open(socket) {
+        openConnection();
+        supervisors.get(socket.data.sessionId)?.connect(socket);
+      },
+      message(socket, message) {
+        const activeSupervisor = supervisors.get(socket.data.sessionId);
+        if (!activeSupervisor || typeof message !== "string") return;
+        const frame = parseTerminalClientMessage(message);
+        if (!frame) return;
+        if (frame.type === "input") {
+          try { activeSupervisor.writeInput(frame.data); } catch { /* Status frames explain offline input. */ }
+        } else {
+          activeSupervisor.resize(frame.cols, frame.rows);
+        }
+      },
+      close(socket) {
+        supervisors.get(socket.data.sessionId)?.disconnect(socket);
+        closeConnection();
+      },
+    },
   });
 
   watcherTimer = setInterval(() => {

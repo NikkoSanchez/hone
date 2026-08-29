@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { resolveArtifactPath, sessionIdForPath } from "./path-safety";
-import type { SessionEndBy, SessionSnapshot } from "./types";
+import type { AgentRuntimeSnapshot, SessionEndBy, SessionSnapshot } from "./types";
 
 export interface RuntimeRecord {
   artifactPath: string;
@@ -36,6 +36,17 @@ export interface SessionPayload extends SessionSnapshot {
   statusUrl: string;
   endUrl: string;
   reviewUrl: string;
+  agentStartUrl: string;
+  agentSendUrl: string;
+  agentInputUrl: string;
+  agentResizeUrl: string;
+  agentStopUrl: string;
+  agentRestartUrl: string;
+  agentConfigureUrl: string;
+  agentTerminalUrl: string;
+  agent?: AgentRuntimeSnapshot;
+  availableAgentAdapters: Array<{ id: string; label: string }>;
+  managedAgentEnabled: boolean;
 }
 
 export interface EnsureServerOptions {
@@ -45,6 +56,8 @@ export interface EnsureServerOptions {
   port: number;
   idleTimeoutMs: number;
   reopen?: boolean;
+  agentId?: string;
+  noAgent?: boolean;
 }
 
 interface RuntimeRegistry {
@@ -154,7 +167,7 @@ function bunExecutable(): string {
 }
 
 async function spawnServer(options: EnsureServerOptions, sessionId: string): Promise<RuntimeRecord> {
-  const child = Bun.spawn([
+  const command = [
     bunExecutable(),
     serverScriptPath(),
     "--artifact",
@@ -167,7 +180,10 @@ async function spawnServer(options: EnsureServerOptions, sessionId: string): Pro
     String(options.port),
     "--idle-timeout-ms",
     String(options.idleTimeoutMs),
-  ], {
+    ...(options.agentId ? ["--agent", options.agentId] : []),
+    ...(options.noAgent ? ["--no-agent"] : []),
+  ];
+  const child = Bun.spawn(command, {
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",
@@ -193,6 +209,12 @@ export async function ensureServer(options: EnsureServerOptions): Promise<Sessio
   if (existing) {
     const session = await fetchSession(existing);
     if (session) {
+      if (options.agentId && session.agent?.adapterId !== options.agentId) {
+        await postJson(`${baseUrl(existing)}/api/session/${existing.sessionId}/agent/configure`, { adapterId: options.agentId });
+        const configured = await fetchSession(existing);
+        if (!configured) throw new Error("Hone agent did not configure cleanly.");
+        return { record: existing, baseUrl: baseUrl(existing), session: configured };
+      }
       if (session.endedAt && options.reopen) {
         await postJson(`${baseUrl(existing)}/api/session/${existing.sessionId}/reopen`, {});
         const reopened = await fetchSession(existing);

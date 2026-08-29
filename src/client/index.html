@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%231eb9b0'/%3E%3Cpath d='M17 34l9 9 21-23' fill='none' stroke='%230e1b25' stroke-width='8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
     <title>Hone · Local review loop</title>
     <link rel="stylesheet" href="/client/styles.css" />
   </head>
@@ -63,6 +64,7 @@
         <div class="rail-tabs" role="tablist" aria-label="Conversation views">
           <button class="rail-tab is-active" type="button" data-view="queue">Queue <span id="queueTabCount">0</span></button>
           <button class="rail-tab" type="button" data-view="history">History</button>
+          <button class="rail-tab" id="agentTab" type="button" data-view="agent">Agent</button>
           <button class="rail-tab" id="reviewTab" type="button" data-view="review" hidden>Review <span id="reviewCount">0</span></button>
         </div>
 
@@ -82,11 +84,21 @@
           <div class="feed-label">DELIVERED HISTORY</div>
           <div id="historyList" class="history-list"></div>
         </section>
+        <section class="rail-view agent-view" id="agentView" hidden>
+          <div class="agent-toolbar">
+            <div class="agent-identity"><strong id="agentName">Choose an agent</strong><span id="agentCwd">Managed terminal is local to this artifact.</span></div>
+            <div class="agent-chooser" id="agentChooser"><select id="agentAdapter" aria-label="Agent CLI"></select><button id="configureAgent" type="button">Launch</button></div>
+            <div class="agent-actions" id="agentActions" hidden><button id="startAgent" type="button">Start</button><button id="restartAgent" type="button">Restart</button><button id="stopAgent" type="button">Stop</button></div>
+          </div>
+          <div class="approval-card" id="approvalCard" hidden><strong>Agent needs your input</strong><span>Review the terminal context and respond explicitly below.</span></div>
+          <div class="terminal-shell"><div id="agentTerminal" aria-label="Agent terminal"></div></div>
+          <div class="terminal-status"><span id="terminalConnection">Connecting…</span><span id="terminalSequence">seq 0</span></div>
+        </section>
         <section class="rail-view" id="reviewView" hidden>
           <div class="feed-label review-feed-label"><span>AGENT FINDINGS</span><button id="copyReview" type="button">Copy GH output</button></div>
           <div id="reviewList" class="review-list"></div>
         </section>
-        <div class="rail-footer">Comments stay local until Send to Agent. The agent receives one feedback envelope, then returns a compact revision result.</div>
+        <div class="rail-footer">Feedback is persisted before terminal submission. Compatibility polling remains available with <code>hone poll</code>.</div>
       </aside>
     </div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>

@@ -26,6 +26,7 @@ const VALUE_FLAGS = new Set([
   "--patch-file",
   "--findings-file",
   "--source",
+  "--agent",
 ]);
 
 const HELP = `Hone · local agent review loop
@@ -59,6 +60,8 @@ Common options:
   --root PATH               Artifact asset root
   --port PORT               Local server port (default: 8765)
   --idle-timeout-ms MS      Daemon idle timeout (default: 1800000; 0 disables)
+  --agent ID                Managed CLI adapter: codex, claude, or opencode
+  --no-agent                Use compatibility polling without a managed terminal
   --limit N                 Maximum artifacts returned by recent (default: 20)
   --no-open                 Do not open the review URL in the system browser
   --reopen                  Reopen a session previously ended by a user or agent
@@ -203,6 +206,8 @@ async function context(args: string[], required = true, inputOverride?: string, 
     port: portOverride ?? portOption(args),
     idleTimeoutMs: idleTimeoutOption(args),
     reopen: hasFlag(args, "--reopen"),
+    ...(flagValue(args, "--agent") ? { agentId: flagValue(args, "--agent") } : {}),
+    noAgent: hasFlag(args, "--no-agent"),
   });
   return {
     artifactInput: input,
@@ -245,7 +250,8 @@ async function runOpen(args: string[]): Promise<void> {
     ended_at: current.handle.session.endedAt,
     review_url: reviewUrl(current),
     artifacts: attached.map((item) => ({ artifact: item.artifactPath, session_id: item.handle.session.id, url: item.handle.baseUrl, review_url: reviewUrl(item) })),
-    ...(!current.handle.session.endedAt ? { next_command: pollCommand(current) } : {}),
+    agent: current.handle.session.agent,
+    ...(!current.handle.session.endedAt && !current.handle.session.agent?.adapterId ? { next_command: pollCommand(current) } : {}),
   });
 }
 
@@ -402,6 +408,8 @@ async function runForegroundServer(args: string[]): Promise<void> {
     stateDir: stateDirectory(args),
     port: portOption(args),
     idleTimeoutMs: idleTimeoutOption(args),
+    ...(flagValue(args, "--agent") ? { agentId: flagValue(args, "--agent") } : {}),
+    noAgent: hasFlag(args, "--no-agent"),
     installSignalHandlers: true,
   });
   console.error(`Hone listening at http://127.0.0.1:${runtime.port}`);

@@ -1,5 +1,41 @@
 export type AgentStatus = "listening" | "working" | "offline";
 
+export type AgentLifecycleStatus = "disabled" | "starting" | "ready" | "working" | "stopping" | "offline" | "error";
+
+export type FeedbackDeliveryStatus = "queued" | "submitted" | "working";
+
+export interface AgentConfiguration {
+  enabled: boolean;
+  adapterId?: string;
+}
+
+export interface AgentExit {
+  code: number;
+  signal?: string;
+  at: string;
+}
+
+export interface PersistedAgentState {
+  configuration: AgentConfiguration;
+  transcriptTail: string;
+  lastExit?: AgentExit;
+}
+
+export interface AgentRuntimeSnapshot {
+  adapterId?: string;
+  adapterLabel?: string;
+  command?: string[];
+  cwd: string;
+  status: AgentLifecycleStatus;
+  pid?: number;
+  sequence: number;
+  transcriptTail: string;
+  lastError?: string;
+  lastExit?: AgentExit;
+  canAcceptInput: boolean;
+  requiresInput: boolean;
+}
+
 export type SessionEndBy = "agent" | "user";
 
 export type SessionEventType = "snapshot" | "queue" | "artifact" | "presence" | "message" | "review";
@@ -102,6 +138,8 @@ export interface SessionSnapshot {
   agentStatus: AgentStatus;
   updatedAt: string;
   deliveryBatchId: string | null;
+  deliveryStatus: FeedbackDeliveryStatus | null;
+  agent?: AgentRuntimeSnapshot;
   review?: CodeReview;
   endedAt?: string;
   endedBy?: SessionEndBy;
@@ -117,6 +155,9 @@ export interface DeliveryState {
   batchId: string;
   envelope: FeedbackEnvelope;
   deliveredAt: string;
+  status?: FeedbackDeliveryStatus;
+  submittedAt?: string;
+  lastActivityAt?: string;
 }
 
 export interface StoredSessionState {
@@ -133,4 +174,5 @@ export interface StoredSessionState {
   endedAt?: string;
   endedBy?: SessionEndBy;
   review?: CodeReview;
+  agent?: PersistedAgentState;
 }

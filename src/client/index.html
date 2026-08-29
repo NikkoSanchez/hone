@@ -3,9 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="light" />
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%231eb9b0'/%3E%3Cpath d='M17 34l9 9 21-23' fill='none' stroke='%230e1b25' stroke-width='8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%238839ef'/%3E%3Cpath d='M17 34l9 9 21-23' fill='none' stroke='%23eff1f5' stroke-width='8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
     <title>Hone · Local review loop</title>
+    <script>
+      (() => {
+        const saved = localStorage.getItem("hone:theme");
+        const theme = saved === "latte" || saved === "mocha"
+          ? saved
+          : matchMedia("(prefers-color-scheme: dark)").matches ? "mocha" : "latte";
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
     <link rel="stylesheet" href="/client/styles.css" />
   </head>
   <body>
@@ -21,6 +30,7 @@
         </div>
         <div class="top-actions">
           <span class="local-pill">127.0.0.1 only</span>
+          <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch color theme">Mocha</button>
           <button class="icon-button mobile-only" id="openPanel" type="button" aria-label="Open feedback panel">☷</button>
         </div>
       </header>

@@ -107,6 +107,7 @@ const railResizer = $("#railResizer") as HTMLDivElement;
 
 const sidebarStorageKey = "hone:sidebar-collapsed";
 const railWidthStorageKey = "hone:conversation-width";
+const themeStorageKey = "hone:theme";
 
 let session: SessionSnapshot;
 let localQueue: FeedbackItem[] = [];
@@ -117,6 +118,24 @@ let toastTimer: number | undefined;
 let ignoreNextArtifactClick = false;
 let hoveredArtifactElement: Element | null = null;
 let terminalClient: AgentTerminalClient | undefined;
+
+function setTheme(theme: "latte" | "mocha"): void {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem(themeStorageKey, theme);
+  const toggle = $("#themeToggle") as HTMLButtonElement;
+  const nextTheme = theme === "latte" ? "mocha" : "latte";
+  toggle.textContent = nextTheme === "latte" ? "Latte" : "Mocha";
+  toggle.setAttribute("aria-label", `Switch to Catppuccin ${nextTheme === "latte" ? "Latte" : "Mocha"}`);
+  toggle.title = `Switch to Catppuccin ${nextTheme === "latte" ? "Latte" : "Mocha"}`;
+}
+
+function installThemeControl(): void {
+  const current = document.documentElement.dataset.theme === "mocha" ? "mocha" : "latte";
+  setTheme(current);
+  $("#themeToggle")!.addEventListener("click", () => {
+    setTheme(document.documentElement.dataset.theme === "mocha" ? "latte" : "mocha");
+  });
+}
 
 function setSidebarCollapsed(collapsed: boolean): void {
   appShell.classList.toggle("sidebar-collapsed", collapsed);
@@ -493,7 +512,7 @@ function installArtifactHooks(): void {
   artifactLoading.classList.add("is-hidden");
   renderArtifactSections(documentRef);
   const style = documentRef.createElement("style");
-  style.textContent = `[data-hone-hover]{outline:2px solid #f4c95d !important;outline-offset:3px !important;}[data-hone-target]{outline:2px solid #1eb9b0 !important;outline-offset:3px !important;}`;
+  style.textContent = `:root{--hone-hover:#df8e1d;--hone-target:#7287fd;}@media(prefers-color-scheme:dark){:root{--hone-hover:#f9e2af;--hone-target:#b4befe;}}[data-hone-hover]{outline:2px solid var(--hone-hover) !important;outline-offset:3px !important;}[data-hone-target]{outline:2px solid var(--hone-target) !important;outline-offset:3px !important;}`;
   documentRef.head.appendChild(style);
 
   documentRef.addEventListener("mouseover", (event) => {
@@ -706,6 +725,7 @@ function locateFinding(index: number): void {
 }
 
 async function boot(): Promise<void> {
+  installThemeControl();
   installLayoutControls();
   const activeArtifact = new URLSearchParams(location.search).get("artifact");
   const response = await fetch(`/api/session${activeArtifact ? `?artifact=${encodeURIComponent(activeArtifact)}` : ""}`);

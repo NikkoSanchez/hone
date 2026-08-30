@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hone"
+  short_description: "Review HTML artifacts with live feedback"
+  default_prompt: "Use $hone to open my latest HTML artifact for review and respond to feedback."

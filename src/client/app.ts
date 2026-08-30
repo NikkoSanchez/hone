@@ -70,6 +70,7 @@ interface SessionSnapshot {
   eventsUrl: string;
   feedbackUrl: string;
   statusUrl: string;
+  endUrl: string;
   reviewUrl: string;
   agentSendUrl: string;
   agentStartUrl: string;
@@ -81,6 +82,9 @@ interface SessionSnapshot {
   availableAgentAdapters: Array<{ id: string; label: string }>;
   agent?: AgentRuntimeSnapshot;
   review?: CodeReview;
+  endedAt?: string;
+  endedBy?: "agent" | "user";
+  endsAfterDelivery?: boolean;
 }
 
 interface SelectedTarget extends TargetRef {
@@ -242,6 +246,16 @@ function statusLabel(status: AgentStatus): string {
 }
 
 function setStatusVisual(status: AgentStatus): void {
+  if (session?.endedAt) {
+    $("#agentStatus")!.textContent = "Ended";
+    $("#sidebarStatus")!.textContent = "Session ended";
+    $("#sidebarStatusDetail")!.textContent = "The artifact and review history are preserved.";
+    for (const dot of [$("#topStatusDot"), $("#sidebarStatusDot"), $("#railStatusDot")]) {
+      dot?.classList.remove("is-working");
+      dot?.classList.add("is-offline");
+    }
+    return;
+  }
   const label = statusLabel(status);
   $("#agentStatus")!.textContent = label;
   $("#sidebarStatus")!.textContent = `Agent ${label.toLowerCase()}`;
@@ -284,8 +298,14 @@ function renderQueue(): void {
   $("#queueTabCount")!.textContent = String(count);
   $("#sidebarQueueCount")!.textContent = String(count);
   const hasDrafts = localQueue.length > 0;
-  $("#sendQueue")!.toggleAttribute("disabled", !hasDrafts);
-  $("#sendEnd")!.toggleAttribute("disabled", !hasDrafts);
+  const ended = Boolean(session.endedAt);
+  const ending = Boolean(session.endsAfterDelivery);
+  $("#sendQueue")!.toggleAttribute("disabled", !hasDrafts || ended || ending);
+  const endButton = $("#sendEnd") as HTMLButtonElement;
+  endButton.disabled = ended || ending;
+  endButton.textContent = ended ? "Session ended" : ending ? "Ends after reply" : hasDrafts ? "Send & end" : "End session";
+  feedbackBody.disabled = ended || ending;
+  ($("#queueComment") as HTMLButtonElement).disabled = ended || ending;
 }
 
 function renderHistory(): void {
@@ -607,7 +627,12 @@ async function queueComment(): Promise<void> {
 }
 
 async function sendQueue(endSession = false): Promise<void> {
+  if (endSession && localQueue.length === 0) {
+    await endCurrentSession();
+    return;
+  }
   if (localQueue.length === 0) return showToast("There are no local comments to send.");
+  if (endSession && !window.confirm("Send this feedback and end the Hone session?")) return;
   if (session.managedAgentEnabled && !session.agent?.adapterId && session.availableAgentAdapters.length > 0) {
     setView("agent");
     return showToast("Choose the CLI Hone should launch before sending feedback.");
@@ -616,18 +641,33 @@ async function sendQueue(endSession = false): Promise<void> {
   const response = await fetch(managed ? session.agentSendUrl : session.feedbackUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ items: localQueue }),
+    body: JSON.stringify({ items: localQueue, ...(endSession ? { endSession: true } : {}) }),
   });
-  const payload = await response.json().catch(() => ({})) as { error?: string; agent?: AgentRuntimeSnapshot };
+  const payload = await response.json().catch(() => ({})) as { error?: string; agent?: AgentRuntimeSnapshot; snapshot?: SessionSnapshot };
   if (!response.ok) return showToast(payload.error ?? `Could not send feedback (${response.status}).`);
   if (payload.agent) session.agent = payload.agent;
+  if (payload.snapshot) session = { ...session, ...payload.snapshot };
   localQueue = [];
   saveDrafts();
   renderQueue();
-  showToast(managed ? "Feedback persisted and submitted to the managed terminal." : "Feedback persisted for the compatibility agent.");
-  if (endSession) {
-    await fetch(session.statusUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "offline" }) });
-  }
+  showToast(endSession
+    ? "Feedback submitted. The session will end after the agent completes this batch."
+    : managed ? "Feedback persisted and submitted to the managed terminal." : "Feedback persisted for the compatibility agent.");
+}
+
+async function endCurrentSession(confirmed = false): Promise<void> {
+  if (session.endedAt) return showToast("This session has already ended.");
+  if (!confirmed && !window.confirm("End this Hone session? Its artifact and review history will be preserved.")) return;
+  const response = await fetch(session.endUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ by: "user" }),
+  });
+  const payload = await response.json().catch(() => ({})) as { error?: string; snapshot?: SessionSnapshot };
+  if (!response.ok) return showToast(payload.error ?? `Could not end session (${response.status}).`);
+  if (payload.snapshot) session = { ...session, ...payload.snapshot };
+  render();
+  showToast("Session ended. The artifact and review history were preserved.");
 }
 
 function moveLocalItem(index: number, direction: -1 | 1): void {

@@ -99,6 +99,7 @@ export class SessionStore {
       updatedAt: now(),
       ...(existing?.endedAt ? { endedAt: existing.endedAt } : {}),
       ...(existing?.endedBy ? { endedBy: existing.endedBy } : {}),
+      ...(existing?.endAfterDeliveryBy ? { endAfterDeliveryBy: existing.endAfterDeliveryBy } : {}),
       ...(existing?.review ? { review: existing.review } : {}),
       ...(existing?.agent ? { agent: existing.agent } : {}),
     };
@@ -125,6 +126,7 @@ export class SessionStore {
       deliveryStatus: this.state.delivery?.status ?? (this.state.delivery ? "queued" : null),
       ...(this.state.endedAt ? { endedAt: this.state.endedAt } : {}),
       ...(this.state.endedBy ? { endedBy: this.state.endedBy } : {}),
+      ...(this.state.endAfterDeliveryBy ? { endsAfterDelivery: true } : {}),
       ...(this.state.review ? { review: clone(this.state.review) } : {}),
     };
   }
@@ -265,6 +267,7 @@ export class SessionStore {
 
   async acknowledge(batchId: string): Promise<void> {
     this.takeDelivery(batchId);
+    this.finishPendingEnd();
     await this.persist();
     this.publish("queue");
     this.publish("message");
@@ -281,6 +284,7 @@ export class SessionStore {
       ? ` Changed anchors: ${reply.changedAnchors.join(", ")}.`
       : "";
     const agentMessage = this.addHistory("agent", `${reply.summary}${detail}`);
+    this.finishPendingEnd();
     await this.persist();
     this.publish("queue");
     this.publish("message", userMessage);
@@ -316,6 +320,7 @@ export class SessionStore {
       this.state.endedAt = now();
       this.state.endedBy = by;
     }
+    this.state.endAfterDeliveryBy = undefined;
     this.state.agentStatus = "offline";
     await this.persist();
     this.publish("presence");
@@ -325,7 +330,15 @@ export class SessionStore {
   async reopen(): Promise<void> {
     this.state.endedAt = undefined;
     this.state.endedBy = undefined;
+    this.state.endAfterDeliveryBy = undefined;
     this.state.agentStatus = "offline";
+    await this.persist();
+    this.publish("presence");
+  }
+
+  async requestEndAfterDelivery(by: SessionEndBy = "user"): Promise<void> {
+    if (this.state.endedAt) return;
+    this.state.endAfterDeliveryBy = by;
     await this.persist();
     this.publish("presence");
   }
@@ -459,6 +472,14 @@ export class SessionStore {
       endedAt: this.state.endedAt,
       endedBy: this.state.endedBy,
     };
+  }
+
+  private finishPendingEnd(): void {
+    if (!this.state.endAfterDeliveryBy || this.state.endedAt) return;
+    this.state.endedAt = now();
+    this.state.endedBy = this.state.endAfterDeliveryBy;
+    this.state.endAfterDeliveryBy = undefined;
+    this.state.agentStatus = "offline";
   }
 
   private publish(type: SessionEventType, message?: HistoryMessage): void {

@@ -10,6 +10,39 @@ bun run dev -- examples/review-plan.html
 
 Then open <http://127.0.0.1:8765>.
 
+## Install Hone and its agent skills from a clone
+
+Hone ships two Agent Skills in this repository:
+
+- `html-artifact` creates self-contained HTML artifacts when a visual or interactive deliverable is more useful than markdown.
+- `hone` opens those artifacts in Hone and guides the durable feedback → revision → completion loop.
+
+On a fresh computer with Bun and Node.js installed, clone the repository and run:
+
+```sh
+git clone https://github.com/NikkoSanchez/hone.git
+cd hone
+bun install
+bun link
+npx skills add . \
+  --skill html-artifact \
+  --skill hone \
+  --agent codex \
+  --global \
+  --copy \
+  --yes
+```
+
+`bun link` makes the local `hone` executable available on your path. The `npx skills` command copies both repository-owned skills into Codex's global skill directory, so they are available across projects on the next agent turn. Remove `--agent codex` to choose another supported agent, or remove `--global` for a project-local skill install.
+
+After installation, ask your agent to use `$html-artifact` when creating a visual report, plan, comparison, prototype, or other standalone HTML artifact. Then use `$hone` to open that artifact for anchored review and continue processing feedback until you end the session.
+
+To refresh globally installed copies after pulling changes to this clone:
+
+```sh
+npx skills update --global html-artifact hone --yes
+```
+
 `examples/review-plan.html` is a small, self-contained reference artifact rather than a visual template. It demonstrates labeled section anchors, granular nested targets, text selection, and an Explore-mode control without duplicating Hone's navigation.
 
 ## Managed agent terminal
@@ -128,6 +161,8 @@ bun run cli -- end plan.html
 bun run cli -- stop plan.html
 bun run cli -- stop --all
 ```
+
+The browser exposes the same end lifecycle. With queued drafts, use **Send & end** to deliver the batch and end the session. With no drafts, the control becomes **End session**. Ending stops Hone's managed agent while preserving the artifact and review history; use `hone reopen <artifact>` when you explicitly want to resume it.
 
 `stop --all` stops every tracked Hone daemon in the selected state directory.
 

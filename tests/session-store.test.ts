@@ -138,6 +138,27 @@ describe("SessionStore", () => {
     }
   });
 
+  test("ends after a final feedback delivery completes", async () => {
+    const { directory, store } = await createStore();
+    try {
+      await store.enqueue([{ target: { anchor: "final" }, body: "Apply this final change." }]);
+      await store.requestEndAfterDelivery("user");
+      const envelope = await store.waitForFeedback(100);
+      if (!isFeedbackEnvelope(envelope)) throw new Error("Expected a feedback envelope.");
+
+      expect(store.snapshot.endedAt).toBeUndefined();
+      expect(store.snapshot.endsAfterDelivery).toBe(true);
+      await store.complete(envelope.batchId, { summary: "Applied the final change." });
+      expect(store.snapshot.endedAt).toBeDefined();
+      expect(store.snapshot.endedBy).toBe("user");
+      expect(store.snapshot.endsAfterDelivery).toBeUndefined();
+      expect(store.snapshot.agentStatus).toBe("offline");
+    } finally {
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("stores an imported code review without publishing it externally", async () => {
     const { directory, store } = await createStore();
     try {

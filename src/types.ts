@@ -143,6 +143,7 @@ export interface SessionSnapshot {
   review?: CodeReview;
   endedAt?: string;
   endedBy?: SessionEndBy;
+  endsAfterDelivery?: boolean;
 }
 
 export interface SessionEvent {
@@ -173,6 +174,7 @@ export interface StoredSessionState {
   updatedAt: string;
   endedAt?: string;
   endedBy?: SessionEndBy;
+  endAfterDeliveryBy?: SessionEndBy;
   review?: CodeReview;
   agent?: PersistedAgentState;
 }

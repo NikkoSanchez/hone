@@ -99,6 +99,17 @@ test("open attaches multiple artifacts and exposes them to the dropdown", async 
     const sessionPayload = await sessionResponse.json() as { review?: { findings: unknown[] } };
     expect(sessionPayload.review?.findings).toHaveLength(1);
 
+    const endResponse = await fetch(`${payload.url}/api/session/${payload.artifacts[0]!.review_url.split("artifact=")[1]}/end`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ by: "user" }),
+    });
+    expect(endResponse.ok).toBe(true);
+    const endPayload = await endResponse.json() as { snapshot: { endedAt?: string; endedBy?: string; agentStatus: string } };
+    expect(endPayload.snapshot.endedAt).toBeDefined();
+    expect(endPayload.snapshot.endedBy).toBe("user");
+    expect(endPayload.snapshot.agentStatus).toBe("offline");
+
     const stoppedFirst = await runCli("stop", first, "--state-dir", stateDir);
     expect(JSON.parse(stoppedFirst.stdout.trim()).status).toBe("stopped");
     const secondSession = await fetch(`${payload.url}/api/session/${payload.artifacts[1]!.review_url.split("artifact=")[1]}`);

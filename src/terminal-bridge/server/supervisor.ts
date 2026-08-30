@@ -263,6 +263,10 @@ export class TerminalSupervisor {
       await this.store.complete(batchId, { summary: "The managed agent returned to its ready prompt after processing the feedback batch." }).catch((error) => {
         this.lastError = error instanceof Error ? error.message : String(error);
       });
+      if (this.store.snapshot.endedAt) {
+        this.track(this.stop());
+        return;
+      }
     }
     this.setStatus("ready");
     await this.store.setAgentStatus("listening");

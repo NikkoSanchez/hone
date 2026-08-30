@@ -1,0 +1,4 @@
+interface:
+  display_name: "HTML Artifact"
+  short_description: "Create useful standalone HTML artifacts"
+  default_prompt: "Use $html-artifact to turn this into a standalone, inspectable HTML artifact."

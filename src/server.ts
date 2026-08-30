@@ -439,6 +439,7 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
       if (!payload) return badRequest("Expected a JSON feedback payload.");
       try {
         const items = await activeStore.enqueue(normalizeFeedbackList(payload));
+        if (payload.endSession === true) await activeStore.requestEndAfterDelivery("user");
         const agent = await activeSupervisor.submitPending();
         return json({ queued: items, snapshot: activeStore.getSnapshot(), agent }, 201);
       } catch (error) {
@@ -496,6 +497,7 @@ export async function startHoneServer(config: HoneServerConfig): Promise<HoneSer
       if (!payload) return badRequest("Expected a JSON feedback payload.");
       try {
         const items = await activeStore.enqueue(normalizeFeedbackList(payload));
+        if (payload.endSession === true) await activeStore.requestEndAfterDelivery("user");
         return json({ queued: items, snapshot: activeStore.getSnapshot() }, 201);
       } catch (error) {
         return badRequest(error instanceof Error ? error.message : "Invalid feedback payload.");

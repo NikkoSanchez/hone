@@ -105,10 +105,13 @@ later `hone another.html` invocation also joins the existing daemon when the
 artifact uses the same `--root`.
 
 Hone does not create or relocate HTML artifacts; it reviews the exact path it
-is given. Codex-generated HTML artifacts without an explicit destination should
-be saved in `/Users/nikkolassanchez/Dev/html-artifacts`. If an artifact is made
-in Documents Playground, it came from the creation/export workflow rather than
-Hone and must be moved or regenerated in the artifact directory before review.
+is given. Agent-generated HTML artifacts without an explicit destination should
+be saved in `~/.hone/html-artifacts`, creating the directory when needed. This
+keeps durable artifacts available across projects without placing generated
+files in the Hone repository or another project's working tree. If an artifact
+is made in Documents Playground, it came from the creation/export workflow
+rather than Hone and must be moved or regenerated in the artifact directory
+before review.
 
 ## Agent code reviews
 
